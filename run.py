@@ -296,10 +296,11 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
     print(f"\nOne node per family, auto-selected by peak |+7d| edge (n≥30 slices):\n")
     _h_hdrs = ''.join(f'{h:>8}' for h in key_h)
     _h_seps = ''.join('--------' for _ in key_h)
-    print(f"  {'family':<18}  {'node':<26}  {'current x':>11}  {_h_hdrs}")
-    print(f"  {'-'*18}  {'-'*26}  {'-'*11}  {_h_seps}")
+    print(f"  {'family':<18}  {'node':<26}  {'current x':>11}  {'n':>6}  {'weight':>6}  {_h_hdrs}")
+    print(f"  {'-'*18}  {'-'*26}  {'-'*11}  {'------':>6}  {'------':>6}  {_h_seps}")
 
     contributions = []
+    weights       = {}
 
     for fam in sorted(best):
         node, _ = best[fam]
@@ -316,15 +317,18 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
 
             fn_tbl = cmb.load_fn_table(path)
             devs   = cmb.eval_at(fn_tbl, current_x)
+            n_val  = int(devs['n']) if pd.notna(devs.get('n', np.nan)) else 0
+            w      = cmb.shrink_weight(n_val)
             devs_h = devs[[c for c in devs.index if c.startswith('+')]]
             contributions.append((node['id'], devs_h))
+            weights[node['id']] = w
 
             def fmtd(h: str) -> str:
                 v = devs_h[h] if h in devs_h.index else np.nan
                 return f'{float(v):+.1f}pp' if pd.notna(v) else '   n/a'
 
             _h_vals = ''.join(f'{fmtd(h):>8}' for h in key_h)
-            print(f"  {fam:<18}  {node['id']:<26}  {current_x:>11.4g}  {_h_vals}")
+            print(f"  {fam:<18}  {node['id']:<26}  {current_x:>11.4g}  {n_val:>6}  {w:>6.2f}  {_h_vals}")
 
         except Exception as e:
             print(f"  {fam:<18}  {node['id']:<26}  {'[error]':>11}  — {e}")
@@ -333,7 +337,7 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
         print('\nNo contributions computed.')
         return
 
-    result = cmb.combine(contributions, br_series, horizons=key_h)
+    result = cmb.combine(contributions, br_series, horizons=key_h, weights=weights)
 
     n_sig = len(contributions)
     print(f"\nNaive Bayes combination [{n_sig} signals, one per family]:\n")

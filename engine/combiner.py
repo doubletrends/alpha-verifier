@@ -12,10 +12,22 @@ import numpy as np
 import pandas as pd
 import openpyxl
 
-_PDF_SHEET   = 'P(up | X ≈ x) - P(up)'
+_PDF_SHEET    = 'P(up | X ≈ x) - P(up)'
 _PDF_HDR_ROW  = 5   # pandas header at Excel row 5 (startrow=4, empty row 4)
 _PDF_DATA_ROW = 6   # data starts at Excel row 6
 _KEY_HORIZONS = ['+3d', '+7d', '+14d']
+
+_SHRINK_FLOOR = 30   # bins with n < 30 contribute zero (CLT floor)
+_SHRINK_N0    = 50   # excess observations needed to reach half-weight above the floor
+
+
+def shrink_weight(n) -> float:
+    """Two-part shrinkage: zero below floor, smooth ramp above."""
+    n = int(n) if pd.notna(n) else 0
+    if n < _SHRINK_FLOOR:
+        return 0.0
+    excess = n - _SHRINK_FLOOR
+    return excess / (excess + _SHRINK_N0)
 
 
 def _logodds(p_pct: float) -> float:
@@ -99,9 +111,10 @@ def best_x(fn_table: pd.DataFrame, horizon: str = '+7d', min_n: int = 30) -> tup
 
 
 def combine(
-    contributions: list,       # [(node_id: str, devs: pd.Series), ...]  devs index = horizon labels
-    base_rate:     pd.Series,  # index = horizon labels, values in %
+    contributions: list,            # [(node_id: str, devs: pd.Series), ...]  devs index = horizon labels
+    base_rate:     pd.Series,       # index = horizon labels, values in %
     horizons:      list = None,
+    weights:       dict | None = None,  # {node_id: float} shrinkage weights; default = 1.0 for all
 ) -> pd.DataFrame:
     """
     Naive-Bayes log-odds combination.
@@ -120,7 +133,8 @@ def combine(
             dev = float(devs.loc[h]) if h in devs.index else np.nan
             row[nid] = dev
             if pd.notna(dev):
-                lo += _logodds(br + dev) - _logodds(br)
+                w = weights[nid] if weights and nid in weights else 1.0
+                lo += w * (_logodds(br + dev) - _logodds(br))
         row['combined'] = _sigmoid_pct(lo)
         row['edge']     = row['combined'] - br
         records[h] = row
