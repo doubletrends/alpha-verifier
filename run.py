@@ -290,10 +290,14 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
     base_rate  = engine.compute_base_rate(ohlcv_data, ws.horizons)
     br_series  = base_rate['win_rate']
 
+    key_h  = [f'+{h}d' for h in ws.horizons]
+
     print(f"\n=== Signal Probe [{ws.dir.name}] — {datetime.date.today()} ===")
     print(f"\nOne node per family, auto-selected by peak |+7d| edge (n≥30 slices):\n")
-    print(f"  {'family':<18}  {'node':<26}  {'current x':>11}  {'+3d':>8}  {'+7d':>8}  {'+14d':>8}")
-    print(f"  {'-'*18}  {'-'*26}  {'-'*11}  {'-'*8}  {'-'*8}  {'-'*8}")
+    _h_hdrs = ''.join(f'{h:>8}' for h in key_h)
+    _h_seps = ''.join('--------' for _ in key_h)
+    print(f"  {'family':<18}  {'node':<26}  {'current x':>11}  {_h_hdrs}")
+    print(f"  {'-'*18}  {'-'*26}  {'-'*11}  {_h_seps}")
 
     contributions = []
 
@@ -319,16 +323,16 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
                 v = devs_h[h] if h in devs_h.index else np.nan
                 return f'{float(v):+.1f}pp' if pd.notna(v) else '   n/a'
 
-            print(f"  {fam:<18}  {node['id']:<26}  {current_x:>11.4g}  {fmtd('+3d'):>8}  {fmtd('+7d'):>8}  {fmtd('+14d'):>8}")
+            _h_vals = ''.join(f'{fmtd(h):>8}' for h in key_h)
+            print(f"  {fam:<18}  {node['id']:<26}  {current_x:>11.4g}  {_h_vals}")
 
         except Exception as e:
-            print(f"  {fam:<18}  {node['id']:<26}  {'[error]':>11}  {'':>8}  {'':>8}  {'':>8}  — {e}")
+            print(f"  {fam:<18}  {node['id']:<26}  {'[error]':>11}  — {e}")
 
     if not contributions:
         print('\nNo contributions computed.')
         return
 
-    key_h  = ['+3d', '+7d', '+14d']
     result = cmb.combine(contributions, br_series, horizons=key_h)
 
     n_sig = len(contributions)
@@ -417,7 +421,7 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
 
     print(f'\nRunning combiner across {len(sample_dates)} monthly dates...')
 
-    key_h   = ['+3d', '+7d', '+14d']
+    key_h   = [f'+{h}d' for h in ws.horizons]
     results = []
 
     for dt in sample_dates:
@@ -438,11 +442,11 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
         result = cmb.combine(contribs, br_series, horizons=key_h)
         p0     = close.iloc[pos]
         row    = {'date': dt}
-        for h_str, h_int in [('3', 3), ('7', 7), ('14', 14)]:
-            h_lbl = f'+{h_str}d'
-            row[f'edge_{h_str}d']   = float(result.loc[h_lbl, 'edge']) if h_lbl in result.index else np.nan
-            fp = pos + h_int
-            row[f'actual_{h_str}d'] = (1 if close.iloc[fp] > p0 else 0) if fp < len(close) else np.nan
+        for h in ws.horizons:
+            h_lbl = f'+{h}d'
+            row[f'edge_{h}d']   = float(result.loc[h_lbl, 'edge']) if h_lbl in result.index else np.nan
+            fp = pos + h
+            row[f'actual_{h}d'] = (1 if close.iloc[fp] > p0 else 0) if fp < len(close) else np.nan
         results.append(row)
 
     df = pd.DataFrame(results)
@@ -467,12 +471,12 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
               f"  {sub['actual_14d'].dropna().mean()*100:>8.0f}%")
 
     print(f"\n  Directional accuracy (edge > 0 → predicted up, edge < 0 → predicted down):")
-    for h_str in ['3', '7', '14']:
-        sub    = df.dropna(subset=[f'actual_{h_str}d', f'edge_{h_str}d'])
-        pred   = sub[f'edge_{h_str}d'] > 0
-        actual = sub[f'actual_{h_str}d'].astype(bool)
+    for h in ws.horizons:
+        sub    = df.dropna(subset=[f'actual_{h}d', f'edge_{h}d'])
+        pred   = sub[f'edge_{h}d'] > 0
+        actual = sub[f'actual_{h}d'].astype(bool)
         n_cor  = (pred == actual).sum()
-        print(f"    +{h_str}d:  {(pred==actual).mean()*100:.0f}%  ({n_cor}/{len(sub)})")
+        print(f"    +{h}d:  {(pred==actual).mean()*100:.0f}%  ({n_cor}/{len(sub)})")
 
     print(f"\n  5 most bullish + 5 most bearish model calls (by +7d edge):\n")
     print(f"  {'date':<12}  {'edge +7d':>9}  {'+7d actual':>11}  {'+14d actual':>12}")
