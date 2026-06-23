@@ -1,119 +1,28 @@
 # winrate-matrix
 
-**One question, answered empirically:**
+Empirical win-rate research pipeline for financial assets.
 
-> If condition Y is true today, what is the probability that price will be higher on day Z?
+For any feature X and any forward horizon H, it answers:
 
-No model. No prediction. Just counting from history.
+> *P(price at t+H > price at t | X > threshold)* — does this condition predict up moves?
 
----
-
-## Output
-
-Every analysis produces one `.xlsx` file with two sheets:
-
-| Sheet | Question |
-|-------|----------|
-| `above` | P(price at +t days > price now \| condition) — green = strong bullish signal |
-| `below` | P(price at +t days < price now \| condition) — red = strong bearish signal |
-
-- **Rows** — conditions swept across the feature's historical range (`x < k` or `x > k`)
-- **Columns** — horizons: `+15d`, `+30d`, … `+720d`
-- **Values** — probability as a percentage (e.g. `87.3%`)
-- **`sample size (n)`** — number of observations matching the condition
-- **Color scale** — above sheet: red→white→green. Below sheet: green→white→red.
+No model. No prediction. Just conditional counting from history, with shrinkage-weighted Naive Bayes combination across signal families.
 
 ---
 
-## Architecture
+## How it works
 
-```
-winrate-matrix/
-  config.py                         shared paths (ODS_CSV, DWD_CSV)
-  pipeline/
-    step_1_data_ingestion.py        fetch BTC price, on-chain, macro → ODS
-    step_2_feature_engineering.py   compute all features             → DWD
-    output/                         pipeline artifacts (gitignored)
-      step1_ods.csv
-      step2_dwd.csv
-  research/
-    framework.py                    shared engine: load_data, compute_matrix,
-                                    compute_signal_matrix, write_xlsx
-    residual/                       log-price residual signal
-      features.py                   expanding-window trend fit (leak-free)
-      matrix.py                     threshold × horizon win-rate matrix
-      mean_reversion.py             binned P(price up) + Spearman correlation
-      thresholds.py                 find 90% / 95% confidence levels
-      output/                       signal artifacts (gitignored)
-        cache.csv                   expanding-window residual cache
-        matrix.xlsx
-    mvrv/                           MVRV ratio signal
-      matrix.py
-      output/
-        matrix.xlsx
-    dxy/                            Dollar Index regime signal
-      matrix.py                     20-day DXY return
-      ret_30_matrix.py              30-day DXY return
-      ret_100_matrix.py             100-day DXY return
-      output/
-        ret_20_matrix.xlsx
-        ret_30_matrix.xlsx
-        ret_100_matrix.xlsx
-    volatility/                     30-day realized volatility signal
-      matrix.py
-      output/
-        matrix.xlsx
-    halving/                        Bitcoin cycle-position signal
-      matrix.py
-      cycle_transition.py
-      output/
-        matrix.xlsx
-        cycle_transition.xlsx
-    rsi/                            RSI 14 short-horizon signal
-      matrix.py
-      output/
-        matrix.xlsx
-    williams_r/                     Williams %R oversold composite signal
-      composite.py
-      plain_7.py
-      plain_14.py
-      output/
-        composite.xlsx
-        plain_7.xlsx
-        plain_14.xlsx
-```
+Each **node** is one feature × one parameter set (e.g. `rsi_14`, `vix_ma_ratio_20`). Running a node produces an `.xlsx` with three tabs:
 
-**Data contract:** `pipeline/output/step2_dwd.csv` is the single input for all research scripts. No research script reads the ODS directly.
+| Tab | Question |
+|-----|----------|
+| **PDF** | P(up \| X ≈ x) − base rate — local win rate at each value of X |
+| **CDF above** | P(up \| X > threshold) − base rate — running cumulative from top |
+| **CDF below** | P(up \| X < threshold) − base rate — running cumulative from bottom |
 
-**Leak-free residual:** `research/residual/features.py` computes the log-price residual using an expanding window — for each date t, the trend is fitted on data[start:t] only. Result is cached to `research/residual/output/cache.csv` and reloaded on subsequent runs.
+Values are **deviations from the unconditional base rate** (so 0 = no edge). Color scale: green = bullish edge, red = bearish edge.
 
----
-
-## Engine API (`research/framework.py`)
-
-```python
-# Load the feature warehouse (injects leak-free residual automatically)
-data = load_data()
-
-# Continuous feature × threshold sweep
-p_above, p_below = compute_matrix(
-    feature    = data['log_price_residual'],
-    thresholds = np.linspace(-1.5, 1.5, 30),
-    horizons   = list(range(15, 731, 15)),
-    data       = data,
-)
-write_xlsx(p_above, p_below, OUT_DIR / 'matrix.xlsx')
-
-# Event-based signal × parameter sweep
-p_bull, p_bear = compute_signal_matrix(
-    bull_fn  = lambda t: os_reversal(t),
-    bear_fn  = lambda t: ob_reversal(t),
-    sweep    = list(range(2, 51, 2)),
-    horizons = list(range(15, 731, 15)),
-    data     = data,
-)
-write_xlsx(p_bull, p_bear, path, sheet_names=('bullish', 'bearish'))
-```
+Nodes are organized into **families** (rsi, ma, vix, …). After all families are tested, `--probe` picks the best node per family and combines them with Naive Bayes log-odds to produce a current P(up) estimate across all horizons.
 
 ---
 
@@ -122,44 +31,155 @@ write_xlsx(p_bull, p_bear, path, sheet_names=('bullish', 'bearish'))
 ```bash
 pip install -r requirements.txt
 
-# First time: fetch data and build features
-python pipeline/step_1_data_ingestion.py
-python pipeline/step_2_feature_engineering.py
+# Check status
+python run.py --workspace btc_daily_14days --status
 
-# Run research
-python research/residual/matrix.py
-python research/mvrv/matrix.py
-python research/williams_r/composite.py
+# Run a family of seeds
+python run.py --workspace btc_daily_14days --family rsi
+
+# Read a result
+python run.py --workspace btc_daily_14days --read rsi_14
+
+# Combined signal probe (after all families tested)
+python run.py --workspace btc_daily_14days --probe
+
+# Backtest the combined signal
+python run.py --workspace btc_daily_14days --backtest
 ```
 
 ---
 
-## Adding a new signal
+## CLI reference
 
-1. Create `research/<signal>/` folder
-2. Write your script — define `HORIZONS`, thresholds or sweep, signal logic
-3. Call `compute_matrix` or `compute_signal_matrix`, then `write_xlsx`
-4. Output goes to `research/<signal>/output/`
+```
+python run.py --workspace <name> [command]
+```
 
-The framework handles computation, colour scale, and file writing.
+| Command | Description |
+|---------|-------------|
+| `--status` | Pending / tested / skipped counts per family |
+| `--list` | List all pending node IDs |
+| `--family <name>` | Run all pending seeds in a family |
+| `--node <id>` | Run a single node |
+| `--read <id>` | Print significant rows from a node's matrix |
+| `--probe` | Current P(up) estimate — best node per family, Naive Bayes combined |
+| `--backtest` | Historical accuracy of the combined signal, bucketed by model edge |
+| `--regen` | Regenerate xlsx files without changing node status |
+
+`--families a,b,c` narrows `--probe` and `--backtest` to specific families.
 
 ---
 
-## Key findings
+## Workspaces
 
-| Signal | Condition | Horizon | P(price up) | n |
-|--------|-----------|---------|-------------|---|
-| Log-price residual | `x < -0.80` | +180d | ~87% | ~400 |
-| Log-price residual | `x < -0.80` | +365d | ~100% | ~400 |
-| Log-price residual | `x > +0.65` | +91d | ~5% (bearish) | ~500 |
-| Realized vol 30d | `x < 18.31` | broad multi-horizon | ~89% to ~99% | 113 |
-| Halving transition | `0.0y→0.5y` to `1.0y→1.25y` | cycle-transition | 100% | varies |
-| Halving transition | `1.5y→2.0y` to `2.0y→2.75y` | cycle-transition bearish | 100% | varies |
-| DXY 30d return | `x < -0.023` | +75d to +90d | ~88.5% to ~90.4% | 470 |
-| DXY 100d return | `x < -0.070` | +75d to +90d | ~100% | 111 |
-| WR oversold composite | both WR deep in oversold | +20d | ~69% | varies |
-| WR oversold composite | neither WR oversold | +55d | ~83% (momentum) | varies |
-| WR pair-state | `short>=long \| short=ob \| long=deep_os` | +9d to +11d | ~77.8% | 54 |
-| WR pair-state | `short<long \| short=ob \| long=ob` | +5d | ~79.5% | 78 |
+Each workspace is a self-contained research unit: one asset, one interval, one horizon range.
 
-The log-price residual is the strongest signal. Low residual = deeply undervalued vs long-run trend = strong mean reversion over 6–12 months. Ultra-low 30-day realized volatility also marks an extreme bullish historical pocket: `realized_vol_30 < 18.31` produces roughly `89%` to `99%` BTC win rates across a broad span of forward horizons. The halving cycle-transition view makes the cycle geometry explicit: early-cycle transitions into the `1.0y→1.5y` zone form a win cluster, while transitions from roughly `1.5y→2.0y` into `2.0y→2.75y` form a loss cluster. DXY weakness appears to be a meaningful medium-horizon regime condition, with the strongest predictive representation concentrated around `+75d` to `+90d`: `dxy_ret_30` is the broadest robust expression, while `dxy_ret_100` contains the most extreme historical pocket. Williams %R captures short-term dynamics best as pair-state regime structure: `short<long | short=ob | long=ob` is strongest over the next 3–5 days, while `short>=long | short=ob | long=deep_os` tends to peak later around days 9–11.
+### `btc_daily_14days`
+
+| Field | Value |
+|-------|-------|
+| Asset | BTC-USD |
+| Interval | 1d |
+| Horizons | +1d → +14d |
+| Start date | 2015-01-01 |
+| Data sources | yfinance (ohlcv), CoinMetrics (on-chain), yfinance (DXY) |
+| Status | **65 nodes tested** across 12 families |
+
+**Key findings:**
+
+| Family | Verdict | Best signal |
+|--------|---------|-------------|
+| on_chain | strong | MVRV < 0.79 → +35pp at +14d; MVRV > 3.3 → −14pp |
+| volatility | strong | Realized vol < 10 (compression) → +24pp at +14d |
+| rsi | strong | RSI > 87 → +20pp at +7d; oversold bounces short-term then reverses |
+| ma | strong | Price > 130% above 200MA → −26pp at +14d |
+| macd | strong | Extreme negative histogram → +11pp at +3d |
+| roc | strong | ROC-7 > 0.11 → +10pp at +7d (momentum continuation) |
+| volume | strong | volume_ratio_14 > 1.83 → +16pp at +3d (short-horizon only) |
+| williams_r | moderate | Extreme overbought → +15pp at +14d |
+| drawdown | moderate | Recovery ratio > 0.43 → +18pp at +14d |
+| dxy | moderate | DXY +3% over 20d → −15pp BTC at +7d |
+| cycle | moderate | Phase 0.15–0.40 (4–18 months post-halving) → +11pp at +14d |
+| stoch | redundant | Mirrors RSI/WR mathematically |
+
+---
+
+### `nasdaq_hourly_24hrs`
+
+| Field | Value |
+|-------|-------|
+| Asset | ^IXIC (NASDAQ Composite) |
+| Interval | 1h |
+| Horizons | +1h → +24h |
+| Start date | 2024-07-01 (yfinance 730-day hourly limit) |
+| Data sources | yfinance (ohlcv, ^VIX, ^TNX) |
+| Status | **29 seed nodes pending** across 10 families |
+
+Families: `rsi`, `ma`, `macd`, `roc`, `volatility`, `volume`, `vix`, `treasury`, `time_of_day`, `day_of_week`
+
+Loop not yet run. Run with:
+
+```bash
+python run.py --workspace nasdaq_hourly_24hrs --family rsi
+```
+
+---
+
+## Adding a new workspace
+
+1. Create `workspaces/<name>/universe.json`:
+
+```json
+{
+  "meta": {
+    "workspace": "<name>",
+    "asset": {"provider": "yfinance", "ticker": "^IXIC", "interval": "1h"},
+    "horizons": [1, 2, ..., 24],
+    "start_date": "2024-07-01"
+  },
+  "families": {
+    "rsi": [
+      {
+        "id": "rsi_14", "family": "rsi", "category": "price_momentum",
+        "feature": "rsi", "params": {"period": 14},
+        "data": ["ohlcv"], "derived_from": null, "status": "pending"
+      }
+    ]
+  }
+}
+```
+
+2. Create `workspaces/<name>/findings.json` with `{}`.
+3. Run `python run.py --workspace <name> --status` to verify.
+
+> **Note:** yfinance hourly data is limited to the last ~730 days. Set `start_date` accordingly.
+
+---
+
+## Adding a new feature
+
+In `data/features.py`:
+
+```python
+def _my_feature(close: pd.Series, period: int) -> pd.Series:
+    return close / close.rolling(period).mean() - 1.0
+
+# Add to compute() dispatch dict:
+'my_feature': lambda: _my_feature(c, p['period']),
+```
+
+Then add a node to the relevant workspace's `universe.json` with `"feature": "my_feature"` and run it.
+
+---
+
+## Available data sources
+
+| Source key | Ticker / API | Columns |
+|------------|-------------|---------|
+| `ohlcv` | Workspace asset (yfinance) | open, high, low, close, volume |
+| `dxy` | DX-Y.NYB (yfinance daily) | dxy |
+| `vix` | ^VIX (yfinance, same interval as workspace) | vix |
+| `treasury` | ^TNX (yfinance, same interval as workspace) | tnx |
+| `coinmetrics` | CoinMetrics community API | mvrv, hash_rate, adr_act_cnt, tx_cnt |
+
+Specify sources in the node's `"data"` array, e.g. `["ohlcv", "vix"]`.
