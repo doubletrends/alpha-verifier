@@ -21,8 +21,8 @@ python run.py --family <name>
 ```
 
 This runs all pending seed nodes in the family and writes:
-- `workspaces/btc_daily/<family>/<node_id>.xlsx` — the matrix
-- `workspaces/btc_daily/<family>/log.jsonl` — metadata + base rates
+- `workspaces/btc_daily_14days/<family>/<node_id>.xlsx` — the matrix
+- `workspaces/btc_daily_14days/<family>/log.jsonl` — metadata + base rates
 
 ---
 
@@ -46,11 +46,11 @@ Read the `above` and `below` tabs. Compare each cell against the **base rate row
 BTC has a persistent uptrend. The unconditional win rate is ~52–56% depending on horizon. **Do not treat any value above 50% as edge.** The relevant comparison is always conditional vs. base rate.
 
 A condition shows **meaningful edge** when:
-- It deviates from base rate by **≥ 4pp** on at least one horizon
-- The deviation is **consistent across 3+ consecutive horizons** (not a single spike)
+- It deviates from base rate by **> 10pp** (positive or negative) on at least one horizon
+- The deviation is **consistent across consecutive horizons** (not a single spike)
 - The sample size `n` is **≥ 50**
 
-A condition that is within ±2pp of base rate across all horizons is a coinflip — record it and move on.
+A condition that is within ±10pp of base rate across all horizons — record it and move on.
 
 ---
 
@@ -67,13 +67,34 @@ A condition that is within ±2pp of base rate across all horizons is a coinflip 
 - All reasonable derivatives have been tested and none improve on seeds
 - You have tested ≥ 3 derived features with no meaningful edge found
 
-When exhausted, move to step 0 and pick the next family.
+When exhausted, go to step 5 before moving to the next family.
 
 ---
 
-## 5. Add a derived feature
+## 5. Record findings
 
-**Step 5a — Write the feature function** into `data/features.py`:
+After exhausting a family, update `workspaces/btc_daily_14days/findings.json`:
+
+```json
+{
+  "rsi": {
+    "verdict": "strong",
+    "best_node": "rsi_18",
+    "key_finding": "RSI > 87 → +20pp at +7d; deep oversold bounces short-term then reverses at +14d",
+    "notes": "rsi_divergence_7_14 shows strong mean-reversion character"
+  }
+}
+```
+
+`verdict` should be one of: `strong`, `moderate`, `weak`, `redundant`.
+
+Then return to step 0 and pick the next family.
+
+---
+
+## 6. Add a derived feature
+
+**Step 6a — Write the feature function** into `data/features.py`:
 
 ```python
 def _my_new_feature(close: pd.Series, ...) -> pd.Series:
@@ -84,7 +105,7 @@ def _my_new_feature(close: pd.Series, ...) -> pd.Series:
 'my_new_feature': lambda: _my_new_feature(c, p['param1'], ...),
 ```
 
-**Step 5b — Append the node** to `workspaces/btc_daily/universe.json` under the correct family:
+**Step 6b — Append the node** to `workspaces/btc_daily_14days/universe.json` under the correct family:
 
 ```json
 {
@@ -99,7 +120,7 @@ def _my_new_feature(close: pd.Series, ...) -> pd.Series:
 }
 ```
 
-**Step 5c — Run it:**
+**Step 6c — Run it:**
 
 ```
 python run.py --node <new_node_id>
@@ -109,9 +130,23 @@ Then return to step 2.
 
 ---
 
-## 6. Log what you found (per family)
+## 7. After all families exhausted — probe and backtest
 
-After exhausting a family, the conclusion lives in the xlsx files and the universe.json derivation tree. The per-family `log.jsonl` is machine-readable run metadata only — no separate summary needed.
+Once `--status` shows 0 pending across all families, run the combined signal probe:
+
+```
+python run.py --probe
+```
+
+This selects the best node per family (by peak |+7d| edge), evaluates current feature values, and outputs a Naive Bayes combined probability estimate across all families.
+
+Then run the historical backtest:
+
+```
+python run.py --backtest
+```
+
+This backtests the combined signal on monthly sampling across the full history, bucketed by model edge, to validate whether the combined signal has directional accuracy.
 
 ---
 
@@ -119,8 +154,9 @@ After exhausting a family, the conclusion lives in the xlsx files and the univer
 
 | Path | Purpose |
 |---|---|
-| `workspaces/btc_daily/universe.json` | Master node list — add derived nodes here |
+| `workspaces/btc_daily_14days/universe.json` | Master node list — add derived nodes here |
+| `workspaces/btc_daily_14days/findings.json` | Human-readable family verdicts and key findings |
 | `data/features.py` | Feature functions — add new ones here |
-| `workspaces/btc_daily/<family>/` | Matrix xlsx files + per-family log |
+| `workspaces/btc_daily_14days/<family>/` | Matrix xlsx files + per-family log |
 | `log.jsonl` | Global run log (all families) |
-| `run.py` | CLI — `--family`, `--node`, `--status`, `--list`, `--read`, `--probe` |
+| `run.py` | CLI — `--family`, `--node`, `--status`, `--list`, `--read`, `--probe`, `--backtest` |

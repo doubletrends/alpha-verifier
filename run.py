@@ -42,7 +42,7 @@ N_THRESHOLDS = 30
 MIN_OBS      = 100
 
 _READ_HORIZONS = ['+3d', '+7d', '+14d']
-_READ_MIN_DEV  = 3.0
+_READ_MIN_DEV  = 10.0
 _READ_MIN_N    = 50
 
 
