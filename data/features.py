@@ -26,6 +26,10 @@ def _williams_r(high: pd.Series, low: pd.Series, close: pd.Series, period: int) 
     return ((close - hh) / (hh - ll) + 1.0)   # normalized to [0, 1]; 1=oversold, 0=overbought
 
 
+def _wr_spread(high: pd.Series, low: pd.Series, close: pd.Series, fast: int, slow: int) -> pd.Series:
+    return _williams_r(high, low, close, fast) - _williams_r(high, low, close, slow)
+
+
 def _stoch_k(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int) -> pd.Series:
     ll = low.rolling(k_period).min()
     hh = high.rolling(k_period).max()
@@ -96,6 +100,14 @@ def _drawdown(close: pd.Series, period: int) -> pd.Series:
 def _drawdown_recovery(close: pd.Series, short: int, long: int) -> pd.Series:
     """Difference between short- and long-period drawdowns. Positive = bouncing from deeper hole."""
     return _drawdown(close, short) - _drawdown(close, long)
+
+
+def _rsi_spread(close: pd.Series, fast: int, slow: int) -> pd.Series:
+    return _rsi(close, fast) - _rsi(close, slow)
+
+
+def _stoch_d(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int, d_period: int = 3) -> pd.Series:
+    return _stoch_k(high, low, close, k_period).rolling(d_period).mean()
 
 
 def _roc(close: pd.Series, period: int) -> pd.Series:
@@ -172,7 +184,10 @@ def compute(data: pd.DataFrame, feature: str, params: dict) -> pd.Series:
 
     dispatch = {
         'rsi':                lambda: _rsi(c, p['period']),
+        'rsi_spread':         lambda: _rsi_spread(c, p['fast'], p['slow']),
+        'stoch_d':            lambda: _stoch_d(h, l, c, p['k_period'], p.get('d_period', 3)),
         'williams_r':         lambda: _williams_r(h, l, c, p['period']),
+        'wr_spread':          lambda: _wr_spread(h, l, c, p['fast'], p['slow']),
         'stoch_k':            lambda: _stoch_k(h, l, c, p['k_period']),
         'macd':               lambda: _macd(c, p['fast'], p['slow']),
         'macd_histogram':     lambda: _macd_histogram(c, p['fast'], p['slow'], p.get('signal', 9)),

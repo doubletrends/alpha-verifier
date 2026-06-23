@@ -516,7 +516,7 @@ def cmd_regen(ws: Workspace, family_name: str | None, node_id: str | None) -> No
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Winrate matrix research pipeline')
-    parser.add_argument('--workspace', metavar='NAME', default='btc_daily', help='Workspace name (default: btc_daily)')
+    parser.add_argument('--workspace', metavar='NAME', default='btc_daily_14days', help='Workspace name (default: btc_daily_14days)')
     parser.add_argument('--regen',    action='store_true', help='Regenerate xlsx without changing status')
     parser.add_argument('--family',   metavar='NAME',      help='Target family')
     parser.add_argument('--node',     metavar='ID',        help='Target node')
