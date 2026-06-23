@@ -462,25 +462,54 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
     labels = ['< -10pp', '-10 to -5', '-5 to 0', '0 to +5', '+5 to +10', '> +10pp']
     df['bucket'] = pd.cut(df['edge_7d'], bins=bins, labels=labels)
 
-    print(f"  Bucketed by +7d model edge:\n")
-    print(f"  {'bucket':<14}  {'N':>4}  {'avg +7d edge':>13}  {'+3d acc':>8}  {'+7d acc':>8}  {'+14d acc':>9}")
-    print(f"  {'-'*14}  {'-'*4}  {'-'*13}  {'-'*8}  {'-'*8}  {'-'*9}")
+    br3  = float(br_series.loc['+3d'])  if '+3d'  in br_series.index else 50.0
+    br7  = float(br_series.loc['+7d'])  if '+7d'  in br_series.index else 50.0
+    br14 = float(br_series.loc['+14d']) if '+14d' in br_series.index else 50.0
+
+    print(f"  Bucketed by +7d model edge  (pp = deviation from base rate, + means model correct):\n")
+    print(f"  {'bucket':<14}  {'N':>4}  {'avg edge':>10}  {'+3d':>8}  {'+7d':>8}  {'+14d':>8}")
+    print(f"  {'-'*14}  {'-'*4}  {'-'*10}  {'-'*8}  {'-'*8}  {'-'*8}")
     for lbl in labels:
         sub = df[df['bucket'] == lbl]
         if len(sub) == 0:
             continue
-        print(f"  {lbl:<14}  {len(sub):>4}  {sub['edge_7d'].mean():>+12.1f}pp"
-              f"  {sub['actual_3d'].dropna().mean()*100:>7.0f}%"
-              f"  {sub['actual_7d'].dropna().mean()*100:>7.0f}%"
-              f"  {sub['actual_14d'].dropna().mean()*100:>8.0f}%")
+        avg_edge  = sub['edge_7d'].mean()
+        direction = 1 if avg_edge >= 0 else -1
+        d3  = f"{direction * (sub['actual_3d'].dropna().mean()  * 100 - br3):+.1f}pp"
+        d7  = f"{direction * (sub['actual_7d'].dropna().mean()  * 100 - br7):+.1f}pp"
+        d14 = f"{direction * (sub['actual_14d'].dropna().mean() * 100 - br14):+.1f}pp"
+        print(f"  {lbl:<14}  {len(sub):>4}  {avg_edge:>+9.1f}pp  {d3:>8}  {d7:>8}  {d14:>8}")
 
-    print(f"\n  Directional accuracy (edge > 0 → predicted up, edge < 0 → predicted down):")
+    # today's estimate — reuse feat_map / fn_map already in memory
+    t_contribs: list = []
+    t_weights:  dict = {}
+    for node in selected:
+        valid = feat_map[node['id']].dropna()
+        if valid.empty:
+            continue
+        devs   = cmb.eval_at(fn_map[node['id']], float(valid.iloc[-1]))
+        n_val  = int(devs['n']) if pd.notna(devs.get('n', np.nan)) else 0
+        devs_h = devs[[c for c in devs.index if c.startswith('+')]]
+        t_contribs.append((node['id'], devs_h))
+        t_weights[node['id']] = cmb.shrink_weight(n_val)
+    today_result = cmb.combine(t_contribs, br_series, horizons=key_h, weights=t_weights)
+
+    print(f"\n  Directional accuracy vs today's model estimate:")
+    print(f"  {'horizon':<8}  {'hist. acc':>14}  {'today edge':>11}  {'today P(up)':>12}")
+    print(f"  {'-'*8}  {'-'*14}  {'-'*11}  {'-'*12}")
     for h in ws.horizons:
+        h_lbl  = f'+{h}d'
         sub    = df.dropna(subset=[f'actual_{h}d', f'edge_{h}d'])
         pred   = sub[f'edge_{h}d'] > 0
         actual = sub[f'actual_{h}d'].astype(bool)
         n_cor  = (pred == actual).sum()
-        print(f"    +{h}d:  {(pred==actual).mean()*100:.0f}%  ({n_cor}/{len(sub)})")
+        acc    = (pred == actual).mean() * 100
+        if h_lbl in today_result.index:
+            edge_s = f"{float(today_result.loc[h_lbl, 'edge']):+.1f}pp"
+            comb_s = f"{float(today_result.loc[h_lbl, 'combined']):.1f}%"
+        else:
+            edge_s, comb_s = 'n/a', 'n/a'
+        print(f"  {h_lbl:<8}  {acc:>9.0f}% ({n_cor}/{len(sub)})  {edge_s:>11}  {comb_s:>12}")
 
     print(f"\n  5 most bullish + 5 most bearish model calls (by +7d edge):\n")
     print(f"  {'date':<12}  {'edge +7d':>9}  {'+7d actual':>11}  {'+14d actual':>12}")
