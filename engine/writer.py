@@ -55,8 +55,8 @@ def _local_function(p_above: pd.DataFrame, base_rate: pd.DataFrame) -> pd.DataFr
     rows, idx = [], []
 
     for i in range(len(p_above) - 1):
-        n_hi    = int(str(p_above.iloc[i]['n']).split('~')[-1])
-        n_lo    = int(str(p_above.iloc[i + 1]['n']).split('~')[-1])
+        n_hi    = int(p_above.iloc[i]['n'])
+        n_lo    = int(p_above.iloc[i + 1]['n'])
         n_slice = n_hi - n_lo
         if n_slice < 1:
             continue
