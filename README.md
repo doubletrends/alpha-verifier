@@ -113,15 +113,24 @@ Each workspace is a self-contained research unit: one asset, one interval, one h
 | Horizons | +1h → +24h |
 | Start date | 2024-07-01 (yfinance 730-day hourly limit) |
 | Data sources | yfinance (ohlcv, ^VIX, ^TNX) |
-| Status | **29 seed nodes pending** across 10 families |
+| Status | **33 nodes tested** across 10 families |
 
-Families: `rsi`, `ma`, `macd`, `roc`, `volatility`, `volume`, `vix`, `treasury`, `time_of_day`, `day_of_week`
+**Key findings:**
 
-Loop not yet run. Run with:
+| Family | Verdict | Best signal |
+|--------|---------|-------------|
+| vix | strong | vix_ret_1 >0.9% → −11.5pp at +3h (n=862); vix_level >30 → +19.9pp at +24h |
+| volatility | strong | realized_vol_24 <2.37 → −36.6pp at +24h (compression bearish); high vol → +20.9pp |
+| macd | strong | macd_12_26 >0.011 → +33pp at +24h; below → +27pp recovery |
+| rsi | strong | RSI-14 overbought >91.87 → +26pp at +6h; momentum continuation |
+| ma | strong | ma_cross_10_50 below zero → +27pp at +24h; ma_ratio_20 >0.025 → +18.5pp |
+| treasury | moderate | tnx_level <3.73 → +37pp at +24h (regime); rising TNX vs MA → paradoxically bullish |
+| roc | weak | roc_6 below <−0.029 → +11.8pp at +6h; not robustly consecutive |
+| volume | weak | No meaningful edge at any horizon |
+| time_of_day | weak | No intraday session patterns |
+| day_of_week | weak | No calendar effects in 2024–present window |
 
-```bash
-python run.py --workspace nasdaq_hourly_24hrs --family rsi
-```
+**Backtest summary (W-MON sampling, N=95):** 56–69% directional accuracy across horizons. Most bearish model calls (< −10pp edge) correctly aligned +17.5pp at +12h. 5/5 extreme bearish calls correct.
 
 ---
 
