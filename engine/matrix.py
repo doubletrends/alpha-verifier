@@ -36,7 +36,7 @@ def _row(mask: pd.Series, future_ups: dict, horizons: list[int]) -> list:
         if i == len(horizons) - 1:
             n_last = n
         row.append(p)
-    return [f'{n_last}~{n_first}'] + row
+    return [n_last] + row
 
 
 def compute_matrix(

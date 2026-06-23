@@ -228,7 +228,7 @@ def cmd_read(ws: Workspace, node_id: str) -> None:
             n_raw = row[ci['n']]
             if not n_raw:
                 continue
-            n = int(str(n_raw).split('~')[0])
+            n = int(n_raw)
             if n < _READ_MIN_N:
                 continue
             devs = {h: row[ci[h]] for h in _READ_HORIZONS if h in ci and row[ci[h]] is not None}
