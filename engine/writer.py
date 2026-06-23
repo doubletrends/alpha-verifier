@@ -18,7 +18,6 @@ _HDR_ROWS  = 3              # rows 1-3: title, formula, description
 _START_ROW = _HDR_ROWS + 1  # startrow for to_excel: empty row 4, pandas header row 5
 _DATA_ROW  = _HDR_ROWS + 3  # first data row = 6
 
-_MERGE_END = 'P'   # merge A:P across header rows (condition + n + 14 horizons)
 
 _FILL_ROW1 = PatternFill(start_color='666666', end_color='666666', fill_type='solid')
 _FILL_ROW2 = PatternFill(start_color='B2B2B2', end_color='B2B2B2', fill_type='solid')
@@ -97,14 +96,14 @@ def _format_cells(ws, n_rows: int, n_horizons: int, data_row: int) -> None:
             ws.cell(row=row, column=col).number_format = _DEV_FMT
 
 
-def _write_headers(ws, row1: str, row2: str, row3: str) -> None:
+def _write_headers(ws, row1: str, row2: str, row3: str, merge_end: str = 'P') -> None:
     specs = [
         (1, row1, Font(bold=True,   size=14, color='FFFFFF'), _FILL_ROW1),
         (2, row2, Font(bold=True,   size=13, color='000000'), _FILL_ROW2),
         (3, row3, Font(           size=12, color='000000'), _FILL_ROW3),
     ]
     for r, text, font, fill in specs:
-        ws.merge_cells(f'A{r}:{_MERGE_END}{r}')
+        ws.merge_cells(f'A{r}:{merge_end}{r}')
         cell           = ws[f'A{r}']
         cell.value     = text
         cell.font      = font
@@ -129,6 +128,7 @@ def write_xlsx(
     n_pdf        = len(fn_df)
     horizon_cols = [c for c in dev_above.columns if c != 'n']
     n_horizons   = len(horizon_cols)
+    merge_end    = get_column_letter(2 + n_horizons)  # condition + n + horizons
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -142,7 +142,8 @@ def write_xlsx(
         _write_headers(wb[SHEET_PDF],
             f'Conditional Winrate on {label} — Probability Density Function (PDF)',
             f'P(price_h0+h > price_h0 | {label} ≈ x) - P(price_h0+h > price_h0)',
-            f'Measures the winrate at horizon h days, given that {label} is approximately at value x, minus the unconditional baseline winrate.',
+            f'Measures the winrate at horizon h, given that {label} is approximately at value x, minus the unconditional baseline winrate.',
+            merge_end=merge_end,
         )
         _format_cells(wb[SHEET_PDF], n_pdf, n_horizons, data_row=_DATA_ROW)
         _color_scale( wb[SHEET_PDF], n_pdf, n_horizons, data_row=_DATA_ROW)
@@ -150,7 +151,8 @@ def write_xlsx(
         _write_headers(wb[SHEET_ABOVE],
             f'Conditional Winrate on {label} — Cumulative Distribution Function (CDF)',
             f'P(price_h0+h > price_h0 | {label} > x) - P(price_h0+h > price_h0)',
-            f'Measures the winrate at horizon h days, given that {label} is above threshold x, minus the unconditional baseline winrate.',
+            f'Measures the winrate at horizon h, given that {label} is above threshold x, minus the unconditional baseline winrate.',
+            merge_end=merge_end,
         )
         _format_cells(wb[SHEET_ABOVE], n_cdf, n_horizons, data_row=_DATA_ROW)
         _color_scale( wb[SHEET_ABOVE], n_cdf, n_horizons, data_row=_DATA_ROW)
@@ -158,7 +160,8 @@ def write_xlsx(
         _write_headers(wb[SHEET_BELOW],
             f'Conditional Winrate on {label} — Cumulative Distribution Function (CDF)',
             f'P(price_h0+h > price_h0 | {label} < x) - P(price_h0+h > price_h0)',
-            f'Measures the winrate at horizon h days, given that {label} is below threshold x, minus the unconditional baseline winrate.',
+            f'Measures the winrate at horizon h, given that {label} is below threshold x, minus the unconditional baseline winrate.',
+            merge_end=merge_end,
         )
         _format_cells(wb[SHEET_BELOW], n_cdf, n_horizons, data_row=_DATA_ROW)
         _color_scale( wb[SHEET_BELOW], n_cdf, n_horizons, data_row=_DATA_ROW)

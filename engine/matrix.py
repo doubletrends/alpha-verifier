@@ -10,7 +10,7 @@ def _price_up(close: pd.Series, h: int) -> pd.Series:
     return (shifted > close).where(shifted.notna())
 
 
-def compute_base_rate(data: pd.DataFrame, horizons: list[int] = HORIZONS) -> pd.DataFrame:
+def compute_base_rate(data: pd.DataFrame, horizons: list[int] = HORIZONS, horizon_unit: str = 'd') -> pd.DataFrame:
     close = data['close']
     rows  = []
     for h in horizons:
@@ -19,7 +19,7 @@ def compute_base_rate(data: pd.DataFrame, horizons: list[int] = HORIZONS) -> pd.
         n     = int(valid.sum())
         p     = float(fu[valid].mean() * 100) if n >= MIN_N else np.nan
         rows.append({'n': n, 'win_rate': p})
-    return pd.DataFrame(rows, index=pd.Index([f'+{h}d' for h in horizons], name='horizon'))
+    return pd.DataFrame(rows, index=pd.Index([f'+{h}{horizon_unit}' for h in horizons], name='horizon'))
 
 
 def _row(mask: pd.Series, future_ups: dict, horizons: list[int]) -> list:
@@ -40,15 +40,16 @@ def _row(mask: pd.Series, future_ups: dict, horizons: list[int]) -> list:
 
 
 def compute_matrix(
-    feature:    pd.Series,
-    thresholds: np.ndarray,
-    horizons:   list[int],
-    data:       pd.DataFrame,
+    feature:      pd.Series,
+    thresholds:   np.ndarray,
+    horizons:     list[int],
+    data:         pd.DataFrame,
+    horizon_unit: str = 'd',
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     close      = data['close']
     feature    = feature.reindex(data.index)
     future_ups = {h: _price_up(close, h) for h in horizons}
-    col_labels = [f'+{h}d' for h in horizons]
+    col_labels = [f'+{h}{horizon_unit}' for h in horizons]
 
     rows_below, rows_above = [], []
     idx_below,  idx_above  = [], []

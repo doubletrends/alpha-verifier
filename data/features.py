@@ -175,6 +175,40 @@ def _days_since_halving(data: pd.DataFrame) -> pd.Series:
     return pd.Series(days, index=data.index, dtype=float)
 
 
+def _time_of_day(data: pd.DataFrame) -> pd.Series:
+    return pd.Series(pd.to_datetime(data.index).hour, index=data.index, dtype=float)
+
+
+def _day_of_week(data: pd.DataFrame) -> pd.Series:
+    return pd.Series(pd.to_datetime(data.index).dayofweek, index=data.index, dtype=float)
+
+
+def _vix_level(data: pd.DataFrame) -> pd.Series:
+    return data['vix']
+
+
+def _vix_ma_ratio(data: pd.DataFrame, period: int) -> pd.Series:
+    v = data['vix'].ffill()
+    return v / v.rolling(period).mean() - 1.0
+
+
+def _vix_ret(data: pd.DataFrame, period: int) -> pd.Series:
+    return data['vix'].ffill().pct_change(period)
+
+
+def _tnx_level(data: pd.DataFrame) -> pd.Series:
+    return data['tnx']
+
+
+def _tnx_ma_ratio(data: pd.DataFrame, period: int) -> pd.Series:
+    t = data['tnx'].ffill()
+    return t / t.rolling(period).mean() - 1.0
+
+
+def _tnx_ret(data: pd.DataFrame, period: int) -> pd.Series:
+    return data['tnx'].ffill().pct_change(period)
+
+
 def compute(data: pd.DataFrame, feature: str, params: dict) -> pd.Series:
     c = data.get('close')
     h = data.get('high')
@@ -211,6 +245,14 @@ def compute(data: pd.DataFrame, feature: str, params: dict) -> pd.Series:
         'days_since_halving': lambda: _days_since_halving(data),
         'cycle_phase':        lambda: _cycle_phase(data),
         'days_to_halving':    lambda: _days_to_halving(data),
+        'time_of_day':        lambda: _time_of_day(data),
+        'day_of_week':        lambda: _day_of_week(data),
+        'vix_level':          lambda: _vix_level(data),
+        'vix_ma_ratio':       lambda: _vix_ma_ratio(data, p['period']),
+        'vix_ret':            lambda: _vix_ret(data, p['period']),
+        'tnx_level':          lambda: _tnx_level(data),
+        'tnx_ma_ratio':       lambda: _tnx_ma_ratio(data, p['period']),
+        'tnx_ret':            lambda: _tnx_ret(data, p['period']),
     }
 
     if feature not in dispatch:

@@ -1,17 +1,17 @@
 """Agent run entry point.
 
 Usage:
-    python run.py --workspace btc_daily --family rsi
-    python run.py --workspace btc_daily --node rsi_14
-    python run.py --workspace btc_daily --next
-    python run.py --workspace btc_daily --list
-    python run.py --workspace btc_daily --status
-    python run.py --workspace btc_daily --read rsi_14
-    python run.py --workspace btc_daily --regen
-    python run.py --workspace btc_daily --regen --family rsi
-    python run.py --workspace btc_daily --regen --node rsi_14
-    python run.py --workspace btc_daily --probe
-    python run.py --workspace btc_daily --probe --families vol,rsi
+    python run.py --workspace btc_daily_14days --family rsi
+    python run.py --workspace btc_daily_14days --node rsi_14
+    python run.py --workspace btc_daily_14days --next
+    python run.py --workspace btc_daily_14days --list
+    python run.py --workspace btc_daily_14days --status
+    python run.py --workspace btc_daily_14days --read rsi_14
+    python run.py --workspace btc_daily_14days --regen
+    python run.py --workspace btc_daily_14days --regen --family rsi
+    python run.py --workspace btc_daily_14days --regen --node rsi_14
+    python run.py --workspace btc_daily_14days --probe
+    python run.py --workspace btc_daily_14days --probe --families vol,rsi
 """
 
 import argparse
@@ -41,9 +41,16 @@ AGENT_DIR    = Path(__file__).resolve().parent
 N_THRESHOLDS = 30
 MIN_OBS      = 100
 
-_READ_HORIZONS = ['+3d', '+7d', '+14d']
 _READ_MIN_DEV  = 10.0
 _READ_MIN_N    = 50
+
+# display_horizons lookup by max horizon value
+_DISPLAY_NUMS = {14: [3, 7, 14], 24: [3, 6, 12, 24]}
+
+
+def _h_num(label: str) -> int:
+    """Extract the numeric part from a horizon label like '+7d' or '+12h'."""
+    return int(''.join(c for c in label if c.isdigit()))
 
 
 # ── workspace ─────────────────────────────────────────────────────────────────
@@ -56,6 +63,8 @@ class Workspace:
         self.horizons   = meta['horizons']
         self.start_date = meta['start_date']
         self.asset      = meta['asset']
+        interval = self.asset.get('interval', '1d')
+        self.horizon_unit = 'h' if interval.endswith('h') else 'd'
 
     @property
     def tree_path(self) -> Path:
@@ -70,6 +79,26 @@ class Workspace:
 
     def family_log(self, family: str) -> Path:
         return self.dir / family / 'log.jsonl'
+
+    @property
+    def key_horizons(self) -> list[str]:
+        return [f'+{h}{self.horizon_unit}' for h in self.horizons]
+
+    @property
+    def pivot_horizon(self) -> str:
+        """Mid-range horizon — used for backtest bucketing and probe selection."""
+        h = self.horizons
+        return f'+{h[(len(h) - 1) // 2]}{self.horizon_unit}'
+
+    @property
+    def display_horizons(self) -> list[str]:
+        """3-4 key horizons for tabular display in --read and --backtest."""
+        max_h = self.horizons[-1]
+        nums  = _DISPLAY_NUMS.get(max_h)
+        if nums is None:
+            n    = len(self.horizons)
+            nums = [self.horizons[n // 4], self.horizons[n // 2], self.horizons[-1]]
+        return [f'+{n}{self.horizon_unit}' for n in nums]
 
 
 # ── core run ──────────────────────────────────────────────────────────────────
@@ -113,14 +142,14 @@ def run_node(ws: Workspace, node_id: str, regen: bool = False) -> None:
     thresholds = np.linspace(lo, hi, N_THRESHOLDS)
     print(f'Feature p2→p98: [{lo:.4g}, {hi:.4g}]')
 
-    base_rate        = engine.compute_base_rate(data, ws.horizons)
-    p_below, p_above = engine.compute_matrix(feat, thresholds, ws.horizons, data)
+    base_rate        = engine.compute_base_rate(data, ws.horizons, horizon_unit=ws.horizon_unit)
+    p_below, p_above = engine.compute_matrix(feat, thresholds, ws.horizons, data, horizon_unit=ws.horizon_unit)
 
     out_path = out_dir / f'{node_id}.xlsx'
     writer.write_xlsx(p_below, p_above, base_rate, out_path, node_id)
 
     br   = {row: round(float(base_rate.loc[row, 'win_rate']), 2) for row in base_rate.index}
-    spot = '  '.join(f'+{h}d={br[f"+{h}d"]:.1f}%' for h in [1, 3, 7, 14])
+    spot = '  '.join(f'{h}={br[h]:.1f}%' for h in ws.display_horizons if h in br)
     print(f'Base rates: {spot}')
 
     if not regen:
@@ -213,6 +242,7 @@ def cmd_read(ws: Workspace, node_id: str) -> None:
         return
 
     wb = openpyxl.load_workbook(path, data_only=True)
+    read_h = ws.display_horizons
 
     print(f"\n{node_id}  [{node['family']}]  {node['feature']}  params={node['params']}")
 
@@ -231,7 +261,7 @@ def cmd_read(ws: Workspace, node_id: str) -> None:
             n = int(n_raw)
             if n < _READ_MIN_N:
                 continue
-            devs = {h: row[ci[h]] for h in _READ_HORIZONS if h in ci and row[ci[h]] is not None}
+            devs = {h: row[ci[h]] for h in read_h if h in ci and row[ci[h]] is not None}
             if any(abs(v) >= _READ_MIN_DEV for v in devs.values()):
                 significant.append((cond, n_raw, devs))
 
@@ -240,14 +270,17 @@ def cmd_read(ws: Workspace, node_id: str) -> None:
             print(f"\n  [{direction}]  no rows ≥ {_READ_MIN_DEV}pp with n ≥ {_READ_MIN_N}")
             continue
 
+        h_hdr = ''.join(f'{h:>8}' for h in read_h)
+        h_sep = ''.join('--------' for _ in read_h)
         print(f"\n  [{direction}]")
-        print(f"  {'condition':<26}  {'n':>12}  {'+3d':>8}  {'+7d':>8}  {'+14d':>8}")
-        print(f"  {'-'*26}  {'-'*12}  {'--------':>8}  {'--------':>8}  {'--------':>8}")
+        print(f"  {'condition':<26}  {'n':>12}  {h_hdr}")
+        print(f"  {'-'*26}  {'-'*12}  {h_sep}")
         for cond, n_raw, devs in significant:
-            def fmt(h):
+            def fmt(h, devs=devs):
                 v = devs.get(h)
                 return f'{v:+.1f}pp' if v is not None else '   n/a'
-            print(f"  {str(cond):<26}  {str(n_raw):>12}  {fmt('+3d'):>8}  {fmt('+7d'):>8}  {fmt('+14d'):>8}")
+            h_vals = ''.join(f'{fmt(h):>8}' for h in read_h)
+            print(f"  {str(cond):<26}  {str(n_raw):>12}  {h_vals}")
 
 
 def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
@@ -271,7 +304,7 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
                 continue
             try:
                 fn_tbl = cmb.load_fn_table(path)
-                pk     = cmb.peak_signal(fn_tbl, '+7d', min_n=30)
+                pk     = cmb.peak_signal(fn_tbl, ws.pivot_horizon, min_n=30)
                 if fam not in best or pk > best[fam][1]:
                     best[fam] = (node, pk)
             except Exception:
@@ -287,13 +320,13 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
 
     print('Fetching latest data...')
     ohlcv_data = get_data(['ohlcv'])
-    base_rate  = engine.compute_base_rate(ohlcv_data, ws.horizons)
+    base_rate  = engine.compute_base_rate(ohlcv_data, ws.horizons, horizon_unit=ws.horizon_unit)
     br_series  = base_rate['win_rate']
 
-    key_h  = [f'+{h}d' for h in ws.horizons]
+    key_h  = ws.key_horizons
 
     print(f"\n=== Signal Probe [{ws.dir.name}] — {datetime.date.today()} ===")
-    print(f"\nOne node per family, auto-selected by peak |+7d| edge (n≥30 slices):\n")
+    print(f"\nOne node per family, auto-selected by peak |{ws.pivot_horizon}| edge (n≥30 slices):\n")
     _h_hdrs = ''.join(f'{h:>8}' for h in key_h)
     _h_seps = ''.join('--------' for _ in key_h)
     print(f"  {'family':<18}  {'node':<26}  {'current x':>11}  {'n':>6}  {'weight':>6}  {_h_hdrs}")
@@ -323,7 +356,7 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
             contributions.append((node['id'], devs_h))
             weights[node['id']] = w
 
-            def fmtd(h: str) -> str:
+            def fmtd(h: str, devs_h=devs_h) -> str:
                 v = devs_h[h] if h in devs_h.index else np.nan
                 return f'{float(v):+.1f}pp' if pd.notna(v) else '   n/a'
 
@@ -372,7 +405,7 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
                 continue
             try:
                 fn_tbl = cmb.load_fn_table(path)
-                pk     = cmb.peak_signal(fn_tbl, '+7d', min_n=30)
+                pk     = cmb.peak_signal(fn_tbl, ws.pivot_horizon, min_n=30)
                 if fam not in best or pk > best[fam][1]:
                     best[fam] = (node, pk)
             except Exception:
@@ -388,7 +421,7 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
 
     print('Fetching data and computing feature series...')
     ohlcv_data = get_data(['ohlcv'])
-    base_rate  = engine.compute_base_rate(ohlcv_data, ws.horizons)
+    base_rate  = engine.compute_base_rate(ohlcv_data, ws.horizons, horizon_unit=ws.horizon_unit)
     br_series  = base_rate['win_rate']
 
     selected: list[dict]               = []
@@ -416,16 +449,18 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
 
     close    = ohlcv_data['close']
     min_date = close.index[250]
-    max_date = close.index[-15]
+    max_date = close.index[-(ws.horizons[-1] + 1)]
+    sample_freq = 'W-MON' if ws.horizon_unit in ('h', 'm') else 'MS'
     sample_dates = []
-    for dt in pd.date_range(start=min_date, end=max_date, freq='MS'):
+    for dt in pd.date_range(start=min_date, end=max_date, freq=sample_freq):
         pos = close.index.searchsorted(dt)
         if pos < len(close.index):
             sample_dates.append(close.index[pos])
 
-    print(f'\nRunning combiner across {len(sample_dates)} monthly dates...')
+    print(f'\nRunning combiner across {len(sample_dates)} sample dates...')
 
-    key_h   = [f'+{h}d' for h in ws.horizons]
+    key_h   = ws.key_horizons
+    u       = ws.horizon_unit
     results = []
 
     for dt in sample_dates:
@@ -447,38 +482,48 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
         p0     = close.iloc[pos]
         row    = {'date': dt}
         for h in ws.horizons:
-            h_lbl = f'+{h}d'
-            row[f'edge_{h}d']   = float(result.loc[h_lbl, 'edge']) if h_lbl in result.index else np.nan
+            h_lbl = f'+{h}{u}'
+            row[f'edge_{h}{u}']   = float(result.loc[h_lbl, 'edge']) if h_lbl in result.index else np.nan
             fp = pos + h
-            row[f'actual_{h}d'] = (1 if close.iloc[fp] > p0 else 0) if fp < len(close) else np.nan
+            row[f'actual_{h}{u}'] = (1 if close.iloc[fp] > p0 else 0) if fp < len(close) else np.nan
         results.append(row)
 
     df = pd.DataFrame(results)
 
-    print(f"\n=== Backtest [{ws.dir.name}] — monthly sampling, N={len(df)}, {len(selected)} signals ===")
+    print(f"\n=== Backtest [{ws.dir.name}] — {sample_freq} sampling, N={len(df)}, {len(selected)} signals ===")
     print(f"  Nodes: {', '.join(n['id'] for n in selected)}\n")
+
+    pvt      = ws.pivot_horizon           # e.g. '+7d' or '+12h'
+    pvt_n    = _h_num(pvt)               # 7 or 12
+    pvt_col  = f'edge_{pvt_n}{u}'        # 'edge_7d' or 'edge_12h'
+    last_h   = ws.horizons[-1]
+    disp_h   = ws.display_horizons        # e.g. ['+3d', '+7d', '+14d']
+    br_vals  = {h: float(br_series.loc[h]) if h in br_series.index else 50.0 for h in disp_h}
 
     bins   = [-200, -10, -5,  0,  5, 10, 200]
     labels = ['< -10pp', '-10 to -5', '-5 to 0', '0 to +5', '+5 to +10', '> +10pp']
-    df['bucket'] = pd.cut(df['edge_7d'], bins=bins, labels=labels)
+    df['bucket'] = pd.cut(df[pvt_col], bins=bins, labels=labels)
 
-    br3  = float(br_series.loc['+3d'])  if '+3d'  in br_series.index else 50.0
-    br7  = float(br_series.loc['+7d'])  if '+7d'  in br_series.index else 50.0
-    br14 = float(br_series.loc['+14d']) if '+14d' in br_series.index else 50.0
-
-    print(f"  Bucketed by +7d model edge  (pp = deviation from base rate, + means model correct):\n")
-    print(f"  {'bucket':<14}  {'N':>4}  {'avg edge':>10}  {'+3d':>8}  {'+7d':>8}  {'+14d':>8}")
-    print(f"  {'-'*14}  {'-'*4}  {'-'*10}  {'-'*8}  {'-'*8}  {'-'*8}")
+    h_hdr = ''.join(f'{h:>8}' for h in disp_h)
+    h_sep = ''.join('--------' for _ in disp_h)
+    print(f"  Bucketed by {pvt} model edge  (pp = deviation from base rate, + means model correct):\n")
+    print(f"  {'bucket':<14}  {'N':>4}  {'avg edge':>10}  {h_hdr}")
+    print(f"  {'-'*14}  {'-'*4}  {'-'*10}  {h_sep}")
     for lbl in labels:
         sub = df[df['bucket'] == lbl]
         if len(sub) == 0:
             continue
-        avg_edge  = sub['edge_7d'].mean()
+        avg_edge  = sub[pvt_col].mean()
         direction = 1 if avg_edge >= 0 else -1
-        d3  = f"{direction * (sub['actual_3d'].dropna().mean()  * 100 - br3):+.1f}pp"
-        d7  = f"{direction * (sub['actual_7d'].dropna().mean()  * 100 - br7):+.1f}pp"
-        d14 = f"{direction * (sub['actual_14d'].dropna().mean() * 100 - br14):+.1f}pp"
-        print(f"  {lbl:<14}  {len(sub):>4}  {avg_edge:>+9.1f}pp  {d3:>8}  {d7:>8}  {d14:>8}")
+        vals_str  = ''
+        for h in disp_h:
+            h_n  = _h_num(h)
+            col  = f'actual_{h_n}{u}'
+            br_v = br_vals[h]
+            v    = sub[col].dropna().mean()
+            dd   = f"{direction * (v * 100 - br_v):+.1f}pp" if pd.notna(v) else '   n/a'
+            vals_str += f'  {dd:>8}'
+        print(f"  {lbl:<14}  {len(sub):>4}  {avg_edge:>+9.1f}pp{vals_str}")
 
     # today's estimate — reuse feat_map / fn_map already in memory
     t_contribs: list = []
@@ -498,10 +543,10 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
     print(f"  {'horizon':<8}  {'hist. acc':>14}  {'today edge':>11}  {'today P(up)':>12}")
     print(f"  {'-'*8}  {'-'*14}  {'-'*11}  {'-'*12}")
     for h in ws.horizons:
-        h_lbl  = f'+{h}d'
-        sub    = df.dropna(subset=[f'actual_{h}d', f'edge_{h}d'])
-        pred   = sub[f'edge_{h}d'] > 0
-        actual = sub[f'actual_{h}d'].astype(bool)
+        h_lbl  = f'+{h}{u}'
+        sub    = df.dropna(subset=[f'actual_{h}{u}', f'edge_{h}{u}'])
+        pred   = sub[f'edge_{h}{u}'] > 0
+        actual = sub[f'actual_{h}{u}'].astype(bool)
         n_cor  = (pred == actual).sum()
         acc    = (pred == actual).mean() * 100
         if h_lbl in today_result.index:
@@ -511,13 +556,13 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
             edge_s, comb_s = 'n/a', 'n/a'
         print(f"  {h_lbl:<8}  {acc:>9.0f}% ({n_cor}/{len(sub)})  {edge_s:>11}  {comb_s:>12}")
 
-    print(f"\n  5 most bullish + 5 most bearish model calls (by +7d edge):\n")
-    print(f"  {'date':<12}  {'edge +7d':>9}  {'+7d actual':>11}  {'+14d actual':>12}")
+    print(f"\n  5 most bullish + 5 most bearish model calls (by {pvt} edge):\n")
+    print(f"  {'date':<12}  {f'edge {pvt}':>9}  {f'{pvt} actual':>11}  {f'+{last_h}{u} actual':>12}")
     print(f"  {'-'*12}  {'-'*9}  {'-'*11}  {'-'*12}")
-    for _, row in pd.concat([df.nlargest(5, 'edge_7d'), df.nsmallest(5, 'edge_7d')]).iterrows():
-        a7  = ('up'   if row['actual_7d']  == 1 else 'DOWN') if pd.notna(row['actual_7d'])  else 'n/a'
-        a14 = ('up'   if row['actual_14d'] == 1 else 'DOWN') if pd.notna(row['actual_14d']) else 'n/a'
-        print(f"  {str(row['date'].date()):<12}  {row['edge_7d']:>+8.1f}pp  {a7:>11}  {a14:>12}")
+    for _, row in pd.concat([df.nlargest(5, pvt_col), df.nsmallest(5, pvt_col)]).iterrows():
+        a_pvt  = ('up'   if row[f'actual_{pvt_n}{u}']  == 1 else 'DOWN') if pd.notna(row[f'actual_{pvt_n}{u}'])  else 'n/a'
+        a_last = ('up'   if row[f'actual_{last_h}{u}'] == 1 else 'DOWN') if pd.notna(row[f'actual_{last_h}{u}']) else 'n/a'
+        print(f"  {str(row['date'].date()):<12}  {row[pvt_col]:>+8.1f}pp  {a_pvt:>11}  {a_last:>12}")
     print()
 
 

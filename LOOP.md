@@ -1,13 +1,14 @@
 # Agent Loop — Procedure
 
 Purely procedural. Follow these steps in order each session.
+Pass `--workspace <name>` to all commands (e.g. `--workspace nasdaq_hourly_24hrs`).
 
 ---
 
 ## 0. Orient
 
 ```
-python run.py --status
+python run.py --workspace <name> --status
 ```
 
 Read the table. Pick the next family with `pending > 0` that has not been worked on yet. Prefer families in this order: work through seed families before moving to derived-only families.
@@ -17,19 +18,19 @@ Read the table. Pick the next family with `pending > 0` that has not been worked
 ## 1. Run seeds for the chosen family
 
 ```
-python run.py --family <name>
+python run.py --workspace <name> --family <family>
 ```
 
 This runs all pending seed nodes in the family and writes:
-- `workspaces/btc_daily_14days/<family>/<node_id>.xlsx` — the matrix
-- `workspaces/btc_daily_14days/<family>/log.jsonl` — metadata + base rates
+- `workspaces/<name>/<family>/<node_id>.xlsx` — the matrix
+- `workspaces/<name>/<family>/log.jsonl` — metadata + base rates
 
 ---
 
 ## 2. Read the results
 
 ```
-python run.py --read <node_id>
+python run.py --workspace <name> --read <node_id>
 ```
 
 Each xlsx has three tabs:
@@ -41,9 +42,9 @@ Read the `above` and `below` tabs. Compare each cell against the **base rate row
 
 ---
 
-## 3. Assess edge — BTC uptrend bias warning
+## 3. Assess edge
 
-BTC has a persistent uptrend. The unconditional win rate is ~52–56% depending on horizon. **Do not treat any value above 50% as edge.** The relevant comparison is always conditional vs. base rate.
+The base rate is the unconditional win rate at each horizon. **Never treat any value above 50% as edge on its own.** The relevant comparison is always conditional vs. base rate.
 
 A condition shows **meaningful edge** when:
 - It deviates from base rate by **> 10pp** (positive or negative) on at least one horizon
@@ -73,14 +74,14 @@ When exhausted, go to step 5 before moving to the next family.
 
 ## 5. Record findings
 
-After exhausting a family, update `workspaces/btc_daily_14days/findings.json`:
+After exhausting a family, update `workspaces/<name>/findings.json`:
 
 ```json
 {
   "rsi": {
     "verdict": "strong",
     "best_node": "rsi_18",
-    "key_finding": "RSI > 87 → +20pp at +7d; deep oversold bounces short-term then reverses at +14d",
+    "key_finding": "RSI > 87 → +20pp at pivot horizon; deep oversold bounces short-term then reverses",
     "notes": "rsi_divergence_7_14 shows strong mean-reversion character"
   }
 }
@@ -105,7 +106,7 @@ def _my_new_feature(close: pd.Series, ...) -> pd.Series:
 'my_new_feature': lambda: _my_new_feature(c, p['param1'], ...),
 ```
 
-**Step 6b — Append the node** to `workspaces/btc_daily_14days/universe.json` under the correct family:
+**Step 6b — Append the node** to `workspaces/<name>/universe.json` under the correct family:
 
 ```json
 {
@@ -123,7 +124,7 @@ def _my_new_feature(close: pd.Series, ...) -> pd.Series:
 **Step 6c — Run it:**
 
 ```
-python run.py --node <new_node_id>
+python run.py --workspace <name> --node <new_node_id>
 ```
 
 Then return to step 2.
@@ -135,18 +136,18 @@ Then return to step 2.
 Once `--status` shows 0 pending across all families, run the combined signal probe:
 
 ```
-python run.py --probe
+python run.py --workspace <name> --probe
 ```
 
-This selects the best node per family (by peak |+7d| edge), evaluates current feature values, and outputs a Naive Bayes combined probability estimate across all families.
+This selects the best node per family (by peak |pivot-horizon| edge), evaluates current feature values, and outputs a Naive Bayes combined probability estimate across all families.
 
 Then run the historical backtest:
 
 ```
-python run.py --backtest
+python run.py --workspace <name> --backtest
 ```
 
-This backtests the combined signal on monthly sampling across the full history, bucketed by model edge, to validate whether the combined signal has directional accuracy.
+This backtests the combined signal on sampled dates across the full history, bucketed by model edge, to validate whether the combined signal has directional accuracy.
 
 ---
 
@@ -154,9 +155,15 @@ This backtests the combined signal on monthly sampling across the full history, 
 
 | Path | Purpose |
 |---|---|
-| `workspaces/btc_daily_14days/universe.json` | Master node list — add derived nodes here |
-| `workspaces/btc_daily_14days/findings.json` | Human-readable family verdicts and key findings |
+| `workspaces/<name>/universe.json` | Master node list — add derived nodes here |
+| `workspaces/<name>/findings.json` | Human-readable family verdicts and key findings |
 | `data/features.py` | Feature functions — add new ones here |
-| `workspaces/btc_daily_14days/<family>/` | Matrix xlsx files + per-family log |
-| `log.jsonl` | Global run log (all families) |
+| `workspaces/<name>/<family>/` | Matrix xlsx files + per-family log |
 | `run.py` | CLI — `--family`, `--node`, `--status`, `--list`, `--read`, `--probe`, `--backtest` |
+
+## Available workspaces
+
+| Workspace | Asset | Interval | Horizons | Data sources |
+|---|---|---|---|---|
+| `btc_daily_14days` | BTC-USD | 1d | +1d → +14d | ohlcv, dxy, coinmetrics |
+| `nasdaq_hourly_24hrs` | ^IXIC | 1h | +1h → +24h | ohlcv, vix, treasury |
