@@ -14,9 +14,14 @@ SHEET_PDF   = 'P(up | X ≈ x) - P(up)'
 SHEET_ABOVE = 'P(up | X > x) - P(up)'
 SHEET_BELOW = 'P(up | X < x) - P(up)'
 
-_HDR_ROWS  = 3              # rows 1-3: title, formula, description
-_START_ROW = _HDR_ROWS + 1  # startrow for to_excel: empty row 4, pandas header row 5
-_DATA_ROW  = _HDR_ROWS + 3  # first data row = 6
+# Excel row layout:
+#   rows 1-3  : header block (title, formula, description)
+#   row 4     : empty (spacer, written by to_excel startrow offset)
+#   row 5     : pandas column headers
+#   row 6+    : data
+_HDR_ROWS  = 3
+_START_ROW = _HDR_ROWS + 1  # to_excel startrow → pandas writes headers at row 5
+_DATA_ROW  = _HDR_ROWS + 3  # first data row = row 6
 
 
 _FILL_ROW1 = PatternFill(start_color='666666', end_color='666666', fill_type='solid')
@@ -50,6 +55,25 @@ def _subtract_base(df: pd.DataFrame, base_rate: pd.DataFrame) -> pd.DataFrame:
 
 
 def _local_function(p_above: pd.DataFrame, base_rate: pd.DataFrame) -> pd.DataFrame:
+    """
+    Recover the local (PDF) win rate by finite-differencing the CDF-above.
+
+    p_above rows are ordered by ascending threshold, so p_above.iloc[i] covers
+    the larger population (feature > lower_threshold) and p_above.iloc[i+1] the
+    smaller one (feature > higher_threshold).  Naming convention:
+      n_hi / v_hi  → higher observation count (lower threshold)
+      n_lo / v_lo  → lower observation count  (higher threshold)
+
+    Wins in the slice between two adjacent thresholds:
+        wins_slice = n_hi · P_hi − n_lo · P_lo
+
+    where P is the raw CDF win rate (percent).  Dividing by n_slice gives the
+    local win rate for observations whose feature value falls in that interval.
+
+    Note: n_hi and n_lo are the longest-horizon counts (n_last from _row), used
+    as a consistent proxy across all horizons.  This slightly understates n for
+    shorter horizons but is conservative and uniformly applied.
+    """
     horizon_cols = [c for c in p_above.columns if c != 'n']
     rows, idx = [], []
 

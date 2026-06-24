@@ -12,13 +12,14 @@ Usage:
     python run.py --workspace btc_daily_14days --regen --node rsi_14
     python run.py --workspace btc_daily_14days --probe
     python run.py --workspace btc_daily_14days --probe --families vol,rsi
+    python run.py --workspace btc_daily_14days --findings
 """
 
 import argparse
 import json
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -36,16 +37,7 @@ from tree.tree import (
     load_tree, save_tree, all_nodes, find_node,
     pending_in_family, all_in_family, next_pending,
 )
-
-AGENT_DIR    = Path(__file__).resolve().parent
-N_THRESHOLDS = 30
-MIN_OBS      = 100
-
-_READ_MIN_DEV  = 10.0
-_READ_MIN_N    = 50
-
-# display_horizons lookup by max horizon value
-_DISPLAY_NUMS = {14: [3, 7, 14], 24: [3, 6, 12, 24]}
+from workspace import Workspace
 
 
 def _h_num(label: str) -> int:
@@ -53,52 +45,56 @@ def _h_num(label: str) -> int:
     return int(''.join(c for c in label if c.isdigit()))
 
 
-# ── workspace ─────────────────────────────────────────────────────────────────
+def _tested_by_family(
+    ws: Workspace,
+    families_filter: list[str] | None = None,
+) -> dict[str, list[dict]]:
+    """Return tested nodes grouped by family, optionally filtered to a subset of families."""
+    tree     = load_tree(ws.tree_path)
+    by_family: dict[str, list[dict]] = defaultdict(list)
+    for node in all_nodes(tree):
+        if node.get('status') == 'tested':
+            by_family[node['family']].append(node)
+    if families_filter:
+        by_family = {f: ns for f, ns in by_family.items() if f in families_filter}
+    return by_family
 
-class Workspace:
-    def __init__(self, name: str):
-        self.dir  = AGENT_DIR / 'workspaces' / name
-        tree      = load_tree(self.dir / 'universe.json')
-        meta      = tree['meta']
-        self.horizons   = meta['horizons']
-        self.start_date = meta['start_date']
-        self.asset      = meta['asset']
-        interval = self.asset.get('interval', '1d')
-        self.horizon_unit = 'h' if interval.endswith('h') else 'd'
 
-    @property
-    def tree_path(self) -> Path:
-        return self.dir / 'universe.json'
+def _select_best_nodes(
+    ws:        Workspace,
+    by_family: dict[str, list[dict]],
+) -> dict[str, tuple[dict, float]]:
+    """
+    For each family, pick the node with the highest peak absolute deviation
+    at the pivot horizon (n ≥ 30 slices required).
 
-    @property
-    def log(self) -> Path:
-        return self.dir / 'log.jsonl'
+    Returns {family: (node, peak_signal)}.
+    """
+    best: dict[str, tuple[dict, float]] = {}
+    for fam, nodes in by_family.items():
+        for node in nodes:
+            path = ws.output_dir(fam) / f'{node["id"]}.xlsx'
+            if not path.exists():
+                continue
+            try:
+                fn_tbl = cmb.load_fn_table(path)
+                pk     = cmb.peak_signal(fn_tbl, ws.pivot_horizon, min_n=30)
+                if fam not in best or pk > best[fam][1]:
+                    best[fam] = (node, pk)
+            except Exception:
+                pass
+    return best
 
-    def output_dir(self, family: str) -> Path:
-        return self.dir / family
 
-    def family_log(self, family: str) -> Path:
-        return self.dir / family / 'log.jsonl'
-
-    @property
-    def key_horizons(self) -> list[str]:
-        return [f'+{h}{self.horizon_unit}' for h in self.horizons]
-
-    @property
-    def pivot_horizon(self) -> str:
-        """Mid-range horizon — used for backtest bucketing and probe selection."""
-        h = self.horizons
-        return f'+{h[(len(h) - 1) // 2]}{self.horizon_unit}'
-
-    @property
-    def display_horizons(self) -> list[str]:
-        """3-4 key horizons for tabular display in --read and --backtest."""
-        max_h = self.horizons[-1]
-        nums  = _DISPLAY_NUMS.get(max_h)
-        if nums is None:
-            n    = len(self.horizons)
-            nums = [self.horizons[n // 4], self.horizons[n // 2], self.horizons[-1]]
-        return [f'+{n}{self.horizon_unit}' for n in nums]
+def _make_loader(ws: Workspace):
+    """Return a cached fetch function: load(sources) → DataFrame, fetched once per unique source set."""
+    cache: dict[tuple, pd.DataFrame] = {}
+    def load(sources: list) -> pd.DataFrame:
+        key = tuple(sorted(sources))
+        if key not in cache:
+            cache[key] = fetcher.fetch(list(sources), start=ws.start_date, asset=ws.asset).dropna(subset=['close'])
+        return cache[key]
+    return load
 
 
 # ── core run ──────────────────────────────────────────────────────────────────
@@ -130,7 +126,7 @@ def run_node(ws: Workspace, node_id: str, regen: bool = False) -> None:
     feat = features.compute(data, node['feature'], node['params']).reindex(data.index)
 
     n_valid = int(feat.notna().sum())
-    if n_valid < MIN_OBS:
+    if n_valid < ws.min_obs:
         print(f'Only {n_valid} valid observations — skipping.')
         if not regen:
             node['status'] = 'skipped'
@@ -139,7 +135,7 @@ def run_node(ws: Workspace, node_id: str, regen: bool = False) -> None:
 
     lo         = float(np.nanpercentile(feat.dropna(), 2))
     hi         = float(np.nanpercentile(feat.dropna(), 98))
-    thresholds = np.linspace(lo, hi, N_THRESHOLDS)
+    thresholds = np.linspace(lo, hi, ws.n_thresholds)
     print(f'Feature p2→p98: [{lo:.4g}, {hi:.4g}]')
 
     base_rate        = engine.compute_base_rate(data, ws.horizons, horizon_unit=ws.horizon_unit)
@@ -164,7 +160,7 @@ def run_node(ws: Workspace, node_id: str, regen: bool = False) -> None:
             'matrix_path':  str(out_path.relative_to(ROOT)),
             'n_obs':        n_valid,
             'horizons':     ws.horizons,
-            'n_thresholds': N_THRESHOLDS,
+            'n_thresholds': ws.n_thresholds,
             'base_rate':    br,
         }
         for log_path in (ws.family_log(family), ws.log):
@@ -232,6 +228,25 @@ def cmd_status(ws: Workspace) -> None:
     print(f"  {'TOTAL':<18s}  {totals['pending']:>7}  {totals['tested']:>6}  {totals['skipped']:>7}")
 
 
+def _significant_rows(wb, read_h: list[str], min_n: int, min_dev: float):
+    """Yield (sheet_name, cond, n_raw, devs) for every significant row across ABOVE and BELOW sheets."""
+    for sheet_name in (writer.SHEET_ABOVE, writer.SHEET_BELOW):
+        ws_sheet = wb[sheet_name]
+        rows = list(ws_sheet.iter_rows(values_only=True))
+        hdrs = rows[4]
+        ci   = {h: i for i, h in enumerate(hdrs) if h is not None}
+        for row in rows[5:]:
+            cond  = row[ci['condition']]
+            n_raw = row[ci['n']]
+            if not n_raw:
+                continue
+            if int(n_raw) < min_n:
+                continue
+            devs = {h: row[ci[h]] for h in read_h if h in ci and row[ci[h]] is not None}
+            if any(abs(v) >= min_dev for v in devs.values()):
+                yield sheet_name, cond, n_raw, devs
+
+
 def cmd_read(ws: Workspace, node_id: str) -> None:
     tree = load_tree(ws.tree_path)
     node = find_node(tree, node_id)
@@ -246,37 +261,23 @@ def cmd_read(ws: Workspace, node_id: str) -> None:
 
     print(f"\n{node_id}  [{node['family']}]  {node['feature']}  params={node['params']}")
 
+    by_sheet = {writer.SHEET_ABOVE: [], writer.SHEET_BELOW: []}
+    for sheet_name, cond, n_raw, devs in _significant_rows(wb, read_h, ws.read_min_n, ws.read_min_dev):
+        by_sheet[sheet_name].append((cond, n_raw, devs))
+
+    h_hdr = ''.join(f'{h:>8}' for h in read_h)
+    h_sep = ''.join('--------' for _ in read_h)
     for sheet_name in (writer.SHEET_ABOVE, writer.SHEET_BELOW):
-        ws_sheet = wb[sheet_name]
-        rows = list(ws_sheet.iter_rows(values_only=True))
-        hdrs = rows[4]
-        ci   = {h: i for i, h in enumerate(hdrs) if h is not None}
-
-        significant = []
-        for row in rows[5:]:
-            cond  = row[ci['condition']]
-            n_raw = row[ci['n']]
-            if not n_raw:
-                continue
-            n = int(n_raw)
-            if n < _READ_MIN_N:
-                continue
-            devs = {h: row[ci[h]] for h in read_h if h in ci and row[ci[h]] is not None}
-            if any(abs(v) >= _READ_MIN_DEV for v in devs.values()):
-                significant.append((cond, n_raw, devs))
-
-        direction = 'above' if '>' in sheet_name else 'below'
+        direction  = 'above' if '>' in sheet_name else 'below'
+        significant = by_sheet[sheet_name]
         if not significant:
-            print(f"\n  [{direction}]  no rows ≥ {_READ_MIN_DEV}pp with n ≥ {_READ_MIN_N}")
+            print(f"\n  [{direction}]  no rows ≥ {ws.read_min_dev}pp with n ≥ {ws.read_min_n}")
             continue
-
-        h_hdr = ''.join(f'{h:>8}' for h in read_h)
-        h_sep = ''.join('--------' for _ in read_h)
         print(f"\n  [{direction}]")
         print(f"  {'condition':<26}  {'n':>12}  {h_hdr}")
         print(f"  {'-'*26}  {'-'*12}  {h_sep}")
         for cond, n_raw, devs in significant:
-            def fmt(h, devs=devs):
+            def fmt(h):
                 v = devs.get(h)
                 return f'{v:+.1f}pp' if v is not None else '   n/a'
             h_vals = ''.join(f'{fmt(h):>8}' for h in read_h)
@@ -284,39 +285,9 @@ def cmd_read(ws: Workspace, node_id: str) -> None:
 
 
 def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
-    import datetime
-
-    tree = load_tree(ws.tree_path)
-
-    by_family: dict[str, list[dict]] = defaultdict(list)
-    for node in all_nodes(tree):
-        if node.get('status') == 'tested':
-            by_family[node['family']].append(node)
-
-    if families_filter:
-        by_family = {f: ns for f, ns in by_family.items() if f in families_filter}
-
-    best: dict[str, tuple[dict, float]] = {}
-    for fam, nodes in by_family.items():
-        for node in nodes:
-            path = ws.output_dir(fam) / f'{node["id"]}.xlsx'
-            if not path.exists():
-                continue
-            try:
-                fn_tbl = cmb.load_fn_table(path)
-                pk     = cmb.peak_signal(fn_tbl, ws.pivot_horizon, min_n=30)
-                if fam not in best or pk > best[fam][1]:
-                    best[fam] = (node, pk)
-            except Exception:
-                pass
-
-    _cache: dict[tuple, pd.DataFrame] = {}
-
-    def get_data(sources: list) -> pd.DataFrame:
-        key = tuple(sorted(sources))
-        if key not in _cache:
-            _cache[key] = fetcher.fetch(list(sources), start=ws.start_date, asset=ws.asset).dropna(subset=['close'])
-        return _cache[key]
+    by_family = _tested_by_family(ws, families_filter)
+    best      = _select_best_nodes(ws, by_family)
+    get_data  = _make_loader(ws)
 
     print('Fetching latest data...')
     ohlcv_data = get_data(['ohlcv'])
@@ -325,7 +296,7 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
 
     key_h  = ws.key_horizons
 
-    print(f"\n=== Signal Probe [{ws.dir.name}] — {datetime.date.today()} ===")
+    print(f"\n=== Signal Probe [{ws.dir.name}] — {date.today()} ===")
     print(f"\nOne node per family, auto-selected by peak |{ws.pivot_horizon}| edge (n≥30 slices):\n")
     _h_hdrs = ''.join(f'{h:>8}' for h in key_h)
     _h_seps = ''.join('--------' for _ in key_h)
@@ -356,7 +327,7 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
             contributions.append((node['id'], devs_h))
             weights[node['id']] = w
 
-            def fmtd(h: str, devs_h=devs_h) -> str:
+            def fmtd(h: str) -> str:
                 v = devs_h[h] if h in devs_h.index else np.nan
                 return f'{float(v):+.1f}pp' if pd.notna(v) else '   n/a'
 
@@ -388,36 +359,9 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
 
 
 def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> None:
-    tree = load_tree(ws.tree_path)
-
-    by_family: dict[str, list[dict]] = defaultdict(list)
-    for node in all_nodes(tree):
-        if node.get('status') == 'tested':
-            by_family[node['family']].append(node)
-    if families_filter:
-        by_family = {f: ns for f, ns in by_family.items() if f in families_filter}
-
-    best: dict[str, tuple[dict, float]] = {}
-    for fam, nodes in by_family.items():
-        for node in nodes:
-            path = ws.output_dir(fam) / f'{node["id"]}.xlsx'
-            if not path.exists():
-                continue
-            try:
-                fn_tbl = cmb.load_fn_table(path)
-                pk     = cmb.peak_signal(fn_tbl, ws.pivot_horizon, min_n=30)
-                if fam not in best or pk > best[fam][1]:
-                    best[fam] = (node, pk)
-            except Exception:
-                pass
-
-    _cache: dict[tuple, pd.DataFrame] = {}
-
-    def get_data(sources: list) -> pd.DataFrame:
-        key = tuple(sorted(sources))
-        if key not in _cache:
-            _cache[key] = fetcher.fetch(list(sources), start=ws.start_date, asset=ws.asset).dropna(subset=['close'])
-        return _cache[key]
+    by_family = _tested_by_family(ws, families_filter)
+    best      = _select_best_nodes(ws, by_family)
+    get_data  = _make_loader(ws)
 
     print('Fetching data and computing feature series...')
     ohlcv_data = get_data(['ohlcv'])
@@ -450,9 +394,8 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
     close    = ohlcv_data['close']
     min_date = close.index[250]
     max_date = close.index[-(ws.horizons[-1] + 1)]
-    sample_freq = 'W-MON' if ws.horizon_unit in ('h', 'm') else 'MS'
     sample_dates = []
-    for dt in pd.date_range(start=min_date, end=max_date, freq=sample_freq):
+    for dt in pd.date_range(start=min_date, end=max_date, freq=ws.sample_freq):
         pos = close.index.searchsorted(dt)
         if pos < len(close.index):
             sample_dates.append(close.index[pos])
@@ -490,14 +433,14 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
 
     df = pd.DataFrame(results)
 
-    print(f"\n=== Backtest [{ws.dir.name}] — {sample_freq} sampling, N={len(df)}, {len(selected)} signals ===")
+    print(f"\n=== Backtest [{ws.dir.name}] — {ws.sample_freq} sampling, N={len(df)}, {len(selected)} signals ===")
     print(f"  Nodes: {', '.join(n['id'] for n in selected)}\n")
 
-    pvt      = ws.pivot_horizon           # e.g. '+7d' or '+12h'
-    pvt_n    = _h_num(pvt)               # 7 or 12
-    pvt_col  = f'edge_{pvt_n}{u}'        # 'edge_7d' or 'edge_12h'
+    pvt      = ws.pivot_horizon
+    pvt_n    = _h_num(pvt)
+    pvt_col  = f'edge_{pvt_n}{u}'
     last_h   = ws.horizons[-1]
-    disp_h   = ws.display_horizons        # e.g. ['+3d', '+7d', '+14d']
+    disp_h   = ws.display_horizons
     br_vals  = {h: float(br_series.loc[h]) if h in br_series.index else 50.0 for h in disp_h}
 
     bins   = [-200, -10, -5,  0,  5, 10, 200]
@@ -525,7 +468,7 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
             vals_str += f'  {dd:>8}'
         print(f"  {lbl:<14}  {len(sub):>4}  {avg_edge:>+9.1f}pp{vals_str}")
 
-    # today's estimate — reuse feat_map / fn_map already in memory
+    # today's estimate
     t_contribs: list = []
     t_weights:  dict = {}
     for node in selected:
@@ -594,6 +537,61 @@ def cmd_regen(ws: Workspace, family_name: str | None, node_id: str | None) -> No
             run_node(ws, nid, regen=True)
 
 
+def cmd_findings(ws: Workspace) -> None:
+    by_family = _tested_by_family(ws)
+    best      = _select_best_nodes(ws, by_family)
+
+    # Load existing findings to preserve hand-written notes
+    findings_path = ws.dir / 'findings.json'
+    existing: dict = {}
+    if findings_path.exists():
+        with open(findings_path, encoding='utf-8') as f:
+            raw = json.load(f)
+        existing = raw.get('families', {})
+
+    read_h   = ws.display_horizons
+    families = {}
+
+    for fam in sorted(best):
+        best_node, best_pk = best[fam]
+
+        path = ws.output_dir(fam) / f'{best_node["id"]}.xlsx'
+        wb   = openpyxl.load_workbook(path, data_only=True)
+        conditions = []
+
+        for sheet_name, cond, n_raw, devs in _significant_rows(wb, read_h, ws.read_min_n, ws.read_min_dev):
+            conditions.append({
+                'direction':  'above' if '>' in sheet_name else 'below',
+                'condition':  str(cond),
+                'n':          int(n_raw),
+                'deviations': {h: round(float(v), 2) for h, v in devs.items()},
+            })
+
+        families[fam] = {
+            'best_node':   best_node['id'],
+            'peak_signal': round(best_pk, 2),
+            'verdict':     'edge' if conditions else 'no_edge',
+            'conditions':  conditions,
+            'notes':       existing.get(fam, {}).get('notes', ''),
+        }
+
+    out = {
+        'workspace':        ws.dir.name,
+        'generated':        datetime.now(timezone.utc).isoformat(),
+        'display_horizons': read_h,
+        'families':         families,
+    }
+
+    with open(findings_path, 'w', encoding='utf-8') as f:
+        json.dump(out, f, indent=2)
+
+    edge_fams    = [f for f, v in families.items() if v['verdict'] == 'edge']
+    no_edge_fams = [f for f in families if f not in edge_fams]
+    print(f"Wrote findings for {len(families)} families → {findings_path.relative_to(ROOT)}")
+    print(f"  Edge    : {', '.join(edge_fams) or '—'}")
+    print(f"  No edge : {', '.join(no_edge_fams) or '—'}")
+
+
 # ── entry ─────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
@@ -610,7 +608,8 @@ if __name__ == '__main__':
     group.add_argument('--status',   action='store_true', help='Show status table by family')
     group.add_argument('--read',     metavar='ID',        help='Print matrix summary for a node')
     group.add_argument('--probe',    action='store_true', help='Combined P(up) probe across all families')
-    group.add_argument('--backtest', action='store_true', help='Backtest probe signal on monthly history')
+    group.add_argument('--backtest', action='store_true', help='Backtest probe signal on historical sample dates')
+    group.add_argument('--findings', action='store_true', help='Generate findings.json for the workspace')
 
     args = parser.parse_args()
     ws   = Workspace(args.workspace)
@@ -623,6 +622,8 @@ if __name__ == '__main__':
         cmd_probe(ws, fam_filter)
     elif args.backtest:
         cmd_backtest(ws, fam_filter)
+    elif args.findings:
+        cmd_findings(ws)
     elif args.regen:
         cmd_regen(ws, args.family, args.node)
     elif args.next:

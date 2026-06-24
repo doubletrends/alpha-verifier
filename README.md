@@ -31,20 +31,12 @@ Nodes are organized into **families** (rsi, ma, vix, …). After all families ar
 ```bash
 pip install -r requirements.txt
 
-# Check status
-python run.py --workspace btc_daily_14days --status
-
-# Run a family of seeds
-python run.py --workspace btc_daily_14days --family rsi
-
-# Read a result
-python run.py --workspace btc_daily_14days --read rsi_14
-
-# Combined signal probe (after all families tested)
-python run.py --workspace btc_daily_14days --probe
-
-# Backtest the combined signal
-python run.py --workspace btc_daily_14days --backtest
+python run.py --workspace <name> --status
+python run.py --workspace <name> --family rsi
+python run.py --workspace <name> --read rsi_14
+python run.py --workspace <name> --probe
+python run.py --workspace <name> --backtest
+python run.py --workspace <name> --findings
 ```
 
 ---
@@ -59,136 +51,141 @@ python run.py --workspace <name> [command]
 |---------|-------------|
 | `--status` | Pending / tested / skipped counts per family |
 | `--list` | List all pending node IDs |
-| `--family <name>` | Run all pending seeds in a family |
+| `--next` | Run the next pending node |
+| `--family <name>` | Run all pending nodes in a family |
 | `--node <id>` | Run a single node |
 | `--read <id>` | Print significant rows from a node's matrix |
 | `--probe` | Current P(up) estimate — best node per family, Naive Bayes combined |
 | `--backtest` | Historical accuracy of the combined signal, bucketed by model edge |
+| `--findings` | Write `findings.json` — structured verdict per family |
 | `--regen` | Regenerate xlsx files without changing node status |
 
 `--families a,b,c` narrows `--probe` and `--backtest` to specific families.
 
 ---
 
-## Workspaces
+## Architecture
 
-Each workspace is a self-contained research unit: one asset, one interval, one horizon range.
+Adding a new workspace requires **no changes to root code**. Each workspace owns everything specific to it; root code owns the stable contracts.
 
-### `btc_daily_14days`
-
-| Field | Value |
-|-------|-------|
-| Asset | BTC-USD |
-| Interval | 1d |
-| Horizons | +1d → +14d |
-| Start date | 2015-01-01 |
-| Data sources | yfinance (ohlcv), CoinMetrics (on-chain), yfinance (DXY) |
-| Status | **65 nodes tested** across 12 families |
-
-**Key findings:**
-
-| Family | Verdict | Best signal |
-|--------|---------|-------------|
-| on_chain | strong | MVRV < 0.79 → +35pp at +14d; MVRV > 3.3 → −14pp |
-| volatility | strong | Realized vol < 10 (compression) → +24pp at +14d |
-| rsi | strong | RSI > 87 → +20pp at +7d; oversold bounces short-term then reverses |
-| ma | strong | Price > 130% above 200MA → −26pp at +14d |
-| macd | strong | Extreme negative histogram → +11pp at +3d |
-| roc | strong | ROC-7 > 0.11 → +10pp at +7d (momentum continuation) |
-| volume | strong | volume_ratio_14 > 1.83 → +16pp at +3d (short-horizon only) |
-| williams_r | moderate | Extreme overbought → +15pp at +14d |
-| drawdown | moderate | Recovery ratio > 0.43 → +18pp at +14d |
-| dxy | moderate | DXY +3% over 20d → −15pp BTC at +7d |
-| cycle | moderate | Phase 0.15–0.40 (4–18 months post-halving) → +11pp at +14d |
-| stoch | redundant | Mirrors RSI/WR mathematically |
+```
+run.py              ← thin CLI dispatcher
+workspace.py        ← Workspace class; loads universe.json + plugin
+data/
+  features.py       ← FeatureRegistry; register() / compute()
+  fetcher.py        ← SourceRegistry; register_source() / fetch()
+engine/             ← matrix, combiner, writer — stable, never changes
+tree/               ← node traversal — stable, never changes
+workspaces/
+  <name>/
+    universe.json   ← asset, horizons, all workspace config
+    plugin.py       ← (optional) custom features and data sources
+    findings.json   ← structured family verdicts, written by --findings
+```
 
 ---
 
-### `nasdaq_hourly_24hrs`
+## Built-in data sources
 
-| Field | Value |
-|-------|-------|
-| Asset | ^IXIC (NASDAQ Composite) |
-| Interval | 1h |
-| Horizons | +1h → +24h |
-| Start date | 2024-07-01 (yfinance 730-day hourly limit) |
-| Data sources | yfinance (ohlcv, ^VIX, ^TNX) |
-| Status | **33 nodes tested** across 10 families |
+| Source key | Provider | Columns |
+|------------|----------|---------|
+| `ohlcv` | yfinance (workspace asset + interval) | open, high, low, close, volume |
+| `dxy` | yfinance DX-Y.NYB (always daily) | dxy |
+| `vix` | yfinance ^VIX (workspace interval) | vix |
+| `treasury` | yfinance ^TNX (workspace interval) | tnx |
+| `coinmetrics` | CoinMetrics community API *(btc_daily_14days plugin)* | mvrv, hash_rate, adr_act_cnt, tx_cnt |
 
-**Key findings:**
-
-| Family | Verdict | Best signal |
-|--------|---------|-------------|
-| vix | strong | vix_ret_1 >0.9% → −11.5pp at +3h (n=862); vix_level >30 → +19.9pp at +24h |
-| volatility | strong | realized_vol_24 <2.37 → −36.6pp at +24h (compression bearish); high vol → +20.9pp |
-| macd | strong | macd_12_26 >0.011 → +33pp at +24h; below → +27pp recovery |
-| rsi | strong | RSI-14 overbought >91.87 → +26pp at +6h; momentum continuation |
-| ma | strong | ma_cross_10_50 below zero → +27pp at +24h; ma_ratio_20 >0.025 → +18.5pp |
-| treasury | moderate | tnx_level <3.73 → +37pp at +24h (regime); rising TNX vs MA → paradoxically bullish |
-| roc | weak | roc_6 below <−0.029 → +11.8pp at +6h; not robustly consecutive |
-| volume | weak | No meaningful edge at any horizon |
-| time_of_day | weak | No intraday session patterns |
-| day_of_week | weak | No calendar effects in 2024–present window |
-
-**Backtest summary (W-MON sampling, N=95):** 56–69% directional accuracy across horizons. Most bearish model calls (< −10pp edge) correctly aligned +17.5pp at +12h. 5/5 extreme bearish calls correct.
+Reference these in node definitions: `"data": ["ohlcv", "vix"]`.
 
 ---
 
-## Adding a new workspace
+## Adding a workspace
 
-1. Create `workspaces/<name>/universe.json`:
+**Step 1** — create `workspaces/<name>/universe.json`:
 
 ```json
 {
   "meta": {
     "workspace": "<name>",
-    "asset": {"provider": "yfinance", "ticker": "^IXIC", "interval": "1h"},
-    "horizons": [1, 2, ..., 24],
-    "start_date": "2024-07-01"
+    "asset": {"provider": "yfinance", "ticker": "SPY", "interval": "1d"},
+    "horizons": [1, 2, 3, 5, 10, 20, 30],
+    "start_date": "2010-01-01",
+    "n_thresholds": 30,
+    "display_horizons": [5, 10, 30],
+    "sample_freq": "MS",
+    "min_obs": 100,
+    "read_min_dev": 10.0,
+    "read_min_n": 50
   },
-  "families": {
-    "rsi": [
-      {
-        "id": "rsi_14", "family": "rsi", "category": "price_momentum",
-        "feature": "rsi", "params": {"period": 14},
-        "data": ["ohlcv"], "derived_from": null, "status": "pending"
-      }
-    ]
-  }
+  "families": {}
 }
 ```
 
-2. Create `workspaces/<name>/findings.json` with `{}`.
-3. Run `python run.py --workspace <name> --status` to verify.
+| Field | Notes |
+|-------|-------|
+| `display_horizons` | 3–4 horizon numbers shown in `--read` and `--backtest` tables |
+| `sample_freq` | pandas offset for backtest sampling: `"MS"` (monthly) for daily, `"W-MON"` (weekly) for intraday |
+| `min_obs` | minimum valid observations required to run a node |
+| `read_min_dev` | pp threshold for `--read` to show a row |
+| `read_min_n` | minimum n for `--read` to show a row |
 
 > **Note:** yfinance hourly data is limited to the last ~730 days. Set `start_date` accordingly.
 
+**Step 2** — create `workspaces/<name>/findings.json`:
+
+```json
+{"workspace": "<name>", "generated": null, "display_horizons": [], "families": {}}
+```
+
+**Step 3** — if this workspace needs custom features or data sources, create `plugin.py` (see below). Otherwise omit it.
+
+**Step 4** — verify: `python run.py --workspace <name> --status`
+
 ---
 
-## Adding a new feature
+## Adding a feature
 
-In `data/features.py`:
+**Cross-asset features** (RSI, MA, ROC, …) belong in `data/features.py`:
 
 ```python
 def _my_feature(close: pd.Series, period: int) -> pd.Series:
-    return close / close.rolling(period).mean() - 1.0
+    ...
 
-# Add to compute() dispatch dict:
-'my_feature': lambda: _my_feature(c, p['period']),
+register('my_feature', lambda d, p: _my_feature(d['close'], p['period']))
 ```
 
-Then add a node to the relevant workspace's `universe.json` with `"feature": "my_feature"` and run it.
+**Workspace-specific features** (on-chain metrics, options IV, …) belong in `workspaces/<name>/plugin.py`:
+
+```python
+from data import features
+
+def _my_feature(data, period): ...
+
+features.register('my_feature', lambda d, p: _my_feature(d, p['period']))
+```
+
+The plugin is loaded automatically when the workspace initializes. Root code is never touched.
 
 ---
 
-## Available data sources
+## Adding a data source
 
-| Source key | Ticker / API | Columns |
-|------------|-------------|---------|
-| `ohlcv` | Workspace asset (yfinance) | open, high, low, close, volume |
-| `dxy` | DX-Y.NYB (yfinance daily) | dxy |
-| `vix` | ^VIX (yfinance, same interval as workspace) | vix |
-| `treasury` | ^TNX (yfinance, same interval as workspace) | tnx |
-| `coinmetrics` | CoinMetrics community API | mvrv, hash_rate, adr_act_cnt, tx_cnt |
+**Universally available sources** belong in `data/fetcher.py`:
 
-Specify sources in the node's `"data"` array, e.g. `["ohlcv", "vix"]`.
+```python
+def _my_source(start: str, asset: dict) -> pd.DataFrame: ...
+
+register_source('my_source', _my_source)
+```
+
+**Workspace-specific sources** belong in `workspaces/<name>/plugin.py`:
+
+```python
+from data import fetcher
+
+def _my_api(start: str, asset: dict) -> pd.DataFrame: ...
+
+fetcher.register_source('my_source', _my_api)
+```
+
+Source functions must return a DataFrame with a `DatetimeIndex`. Add to node definitions: `"data": ["ohlcv", "my_source"]`.

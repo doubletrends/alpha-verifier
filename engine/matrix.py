@@ -1,16 +1,22 @@
 import numpy as np
 import pandas as pd
 
-MIN_N    = 20
-HORIZONS = list(range(1, 15))   # +1d … +14d
+MIN_N = 20
 
 
 def _price_up(close: pd.Series, h: int) -> pd.Series:
+    """Return True/False/NaN: did close rise h bars later? NaN for the last h rows (no outcome yet)."""
     shifted = close.shift(-h)
     return (shifted > close).where(shifted.notna())
 
 
-def compute_base_rate(data: pd.DataFrame, horizons: list[int] = HORIZONS, horizon_unit: str = 'd') -> pd.DataFrame:
+def compute_base_rate(data: pd.DataFrame, horizons: list[int], horizon_unit: str = 'd') -> pd.DataFrame:
+    """
+    Unconditional win rate P(close[t+h] > close[t]) for each horizon h.
+
+    Returns a DataFrame indexed by horizon label (e.g. '+7d'), columns ['n', 'win_rate'].
+    win_rate is in percent. Rows where n < MIN_N are NaN.
+    """
     close = data['close']
     rows  = []
     for h in horizons:
@@ -23,16 +29,21 @@ def compute_base_rate(data: pd.DataFrame, horizons: list[int] = HORIZONS, horizo
 
 
 def _row(mask: pd.Series, future_ups: dict, horizons: list[int]) -> list:
+    """
+    Compute win rates for one threshold slice across all horizons.
+
+    Returns [n_last, p_h1, p_h2, ...] where n_last is the observation count
+    for the longest horizon — the most conservative choice because longer horizons
+    lose more tail rows (no known outcome yet), so n strictly decreases with h.
+    Reporting n_last avoids overstating sample size for shorter horizons.
+    """
     row     = []
-    n_first = 0
     n_last  = 0
     for i, h in enumerate(horizons):
         fu    = future_ups[h]
         valid = mask & fu.notna()
         n     = int(valid.sum())
         p     = float(fu[valid].mean() * 100) if n >= MIN_N else np.nan
-        if i == 0:
-            n_first = n
         if i == len(horizons) - 1:
             n_last = n
         row.append(p)
@@ -46,6 +57,16 @@ def compute_matrix(
     data:         pd.DataFrame,
     horizon_unit: str = 'd',
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Compute CDF-style conditional win rates across a range of thresholds.
+
+    For each threshold t, computes:
+      p_below: P(up | feature < t) − one row per threshold, columns [n, +h1, +h2, ...]
+      p_above: P(up | feature > t) − same layout
+
+    Win rates are in percent (raw, not yet subtracted from base rate).
+    The n column reports the longest-horizon count (most conservative); see _row.
+    """
     close      = data['close']
     feature    = feature.reindex(data.index)
     future_ups = {h: _price_up(close, h) for h in horizons}

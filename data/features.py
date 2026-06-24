@@ -1,16 +1,21 @@
 import numpy as np
 import pandas as pd
+from typing import Callable
 
-HALVING_DATES = pd.to_datetime([
-    '2012-11-28',
-    '2016-07-09',
-    '2020-05-11',
-    '2024-04-20',
-])
+_registry: dict[str, Callable] = {}
 
-_NEXT_HALVING_EST = pd.Timestamp('2028-04-20')
-_ALL_HALVINGS = list(HALVING_DATES) + [_NEXT_HALVING_EST]
 
+def register(name: str, fn: Callable) -> None:
+    _registry[name] = fn
+
+
+def compute(data: pd.DataFrame, feature: str, params: dict) -> pd.Series:
+    if feature not in _registry:
+        raise ValueError(f"Unknown feature: '{feature}'. Available: {sorted(_registry)}")
+    return _registry[feature](data, params)
+
+
+# ── private helpers ──────────────────────────────────────────────────────────
 
 def _rsi(close: pd.Series, period: int) -> pd.Series:
     delta = close.diff()
@@ -98,7 +103,6 @@ def _drawdown(close: pd.Series, period: int) -> pd.Series:
 
 
 def _drawdown_recovery(close: pd.Series, short: int, long: int) -> pd.Series:
-    """Difference between short- and long-period drawdowns. Positive = bouncing from deeper hole."""
     return _drawdown(close, short) - _drawdown(close, long)
 
 
@@ -125,54 +129,6 @@ def _dxy_ret(dxy: pd.Series, period: int) -> pd.Series:
 def _dxy_ma_ratio(dxy: pd.Series, period: int) -> pd.Series:
     dxy = dxy.ffill()  # fill weekend gaps so rolling window sees consecutive values
     return dxy / dxy.rolling(period).mean() - 1.0
-
-
-def _mvrv(data: pd.DataFrame) -> pd.Series:
-    return data['mvrv']
-
-
-def _hash_rate_ma_ratio(data: pd.DataFrame, period: int) -> pd.Series:
-    hr = np.log(data['hash_rate'].replace(0, np.nan))
-    return hr / hr.rolling(period).mean() - 1.0
-
-
-def _adr_act_ma_ratio(data: pd.DataFrame, period: int) -> pd.Series:
-    aa = np.log(data['adr_act_cnt'].replace(0, np.nan))
-    return aa / aa.rolling(period).mean() - 1.0
-
-
-def _cycle_phase(data: pd.DataFrame) -> pd.Series:
-    """Fractional position in the current halving cycle: 0 = just after halving, 1 = just before next."""
-    dates = pd.to_datetime(data.index)
-    phases = []
-    for dt in dates:
-        past   = [h for h in _ALL_HALVINGS if h <= dt]
-        future = [h for h in _ALL_HALVINGS if h > dt]
-        last   = max(past) if past else _ALL_HALVINGS[0]
-        nxt    = min(future) if future else _NEXT_HALVING_EST
-        phases.append((dt - last).days / max((nxt - last).days, 1))
-    return pd.Series(phases, index=data.index, dtype=float)
-
-
-def _days_to_halving(data: pd.DataFrame) -> pd.Series:
-    """Days remaining until the next halving event."""
-    dates = pd.to_datetime(data.index)
-    vals = []
-    for dt in dates:
-        future = [h for h in _ALL_HALVINGS if h > dt]
-        nxt    = min(future) if future else _NEXT_HALVING_EST
-        vals.append(max(0, (nxt - dt).days))
-    return pd.Series(vals, index=data.index, dtype=float)
-
-
-def _days_since_halving(data: pd.DataFrame) -> pd.Series:
-    dates = pd.to_datetime(data.index)
-    days  = []
-    for dt in dates:
-        eligible = HALVING_DATES[HALVING_DATES <= dt]
-        last     = eligible.max() if len(eligible) else HALVING_DATES.min()
-        days.append(max(0, (dt - last).days))
-    return pd.Series(days, index=data.index, dtype=float)
 
 
 def _time_of_day(data: pd.DataFrame) -> pd.Series:
@@ -209,52 +165,35 @@ def _tnx_ret(data: pd.DataFrame, period: int) -> pd.Series:
     return data['tnx'].ffill().pct_change(period)
 
 
-def compute(data: pd.DataFrame, feature: str, params: dict) -> pd.Series:
-    c = data.get('close')
-    h = data.get('high')
-    l = data.get('low')
-    v = data.get('volume')
-    p = params
+# ── built-in registrations ────────────────────────────────────────────────────
 
-    dispatch = {
-        'rsi':                lambda: _rsi(c, p['period']),
-        'rsi_spread':         lambda: _rsi_spread(c, p['fast'], p['slow']),
-        'stoch_d':            lambda: _stoch_d(h, l, c, p['k_period'], p.get('d_period', 3)),
-        'williams_r':         lambda: _williams_r(h, l, c, p['period']),
-        'wr_spread':          lambda: _wr_spread(h, l, c, p['fast'], p['slow']),
-        'stoch_k':            lambda: _stoch_k(h, l, c, p['k_period']),
-        'macd':               lambda: _macd(c, p['fast'], p['slow']),
-        'macd_histogram':     lambda: _macd_histogram(c, p['fast'], p['slow'], p.get('signal', 9)),
-        'ma_ratio':           lambda: _ma_ratio(c, p['period']),
-        'ma_cross':           lambda: _ma_cross(c, p['fast'], p['slow']),
-        'realized_vol':       lambda: _realized_vol(c, p['period']),
-        'vol_ratio':          lambda: _vol_ratio(c, p['fast'], p['slow']),
-        'atr':                lambda: _atr(h, l, c, p['period']),
-        'bb_pct':             lambda: _bb_pct(c, p['period'], p.get('std_dev', 2.0)),
-        'bb_width':           lambda: _bb_width(c, p['period'], p.get('std_dev', 2.0)),
-        'volume_ratio':       lambda: _volume_ratio(v, p['period']),
-        'drawdown':           lambda: _drawdown(c, p['period']),
-        'drawdown_recovery':  lambda: _drawdown_recovery(c, p['short'], p['long']),
-        'roc':                lambda: _roc(c, p['period']),
-        'roc_spread':         lambda: _roc_spread(c, p['fast'], p['slow']),
-        'dxy_ret':            lambda: _dxy_ret(data['dxy'], p['period']),
-        'dxy_ma_ratio':       lambda: _dxy_ma_ratio(data['dxy'], p['period']),
-        'mvrv':               lambda: _mvrv(data),
-        'hash_rate_ma_ratio': lambda: _hash_rate_ma_ratio(data, p['period']),
-        'adr_act_ma_ratio':   lambda: _adr_act_ma_ratio(data, p['period']),
-        'days_since_halving': lambda: _days_since_halving(data),
-        'cycle_phase':        lambda: _cycle_phase(data),
-        'days_to_halving':    lambda: _days_to_halving(data),
-        'time_of_day':        lambda: _time_of_day(data),
-        'day_of_week':        lambda: _day_of_week(data),
-        'vix_level':          lambda: _vix_level(data),
-        'vix_ma_ratio':       lambda: _vix_ma_ratio(data, p['period']),
-        'vix_ret':            lambda: _vix_ret(data, p['period']),
-        'tnx_level':          lambda: _tnx_level(data),
-        'tnx_ma_ratio':       lambda: _tnx_ma_ratio(data, p['period']),
-        'tnx_ret':            lambda: _tnx_ret(data, p['period']),
-    }
-
-    if feature not in dispatch:
-        raise ValueError(f"Unknown feature: '{feature}'. Available: {sorted(dispatch)}")
-    return dispatch[feature]()
+register('rsi',               lambda d, p: _rsi(d['close'], p['period']))
+register('rsi_spread',        lambda d, p: _rsi_spread(d['close'], p['fast'], p['slow']))
+register('stoch_k',           lambda d, p: _stoch_k(d['high'], d['low'], d['close'], p['k_period']))
+register('stoch_d',           lambda d, p: _stoch_d(d['high'], d['low'], d['close'], p['k_period'], p.get('d_period', 3)))
+register('williams_r',        lambda d, p: _williams_r(d['high'], d['low'], d['close'], p['period']))
+register('wr_spread',         lambda d, p: _wr_spread(d['high'], d['low'], d['close'], p['fast'], p['slow']))
+register('macd',              lambda d, p: _macd(d['close'], p['fast'], p['slow']))
+register('macd_histogram',    lambda d, p: _macd_histogram(d['close'], p['fast'], p['slow'], p.get('signal', 9)))
+register('ma_ratio',          lambda d, p: _ma_ratio(d['close'], p['period']))
+register('ma_cross',          lambda d, p: _ma_cross(d['close'], p['fast'], p['slow']))
+register('realized_vol',      lambda d, p: _realized_vol(d['close'], p['period']))
+register('vol_ratio',         lambda d, p: _vol_ratio(d['close'], p['fast'], p['slow']))
+register('atr',               lambda d, p: _atr(d['high'], d['low'], d['close'], p['period']))
+register('bb_pct',            lambda d, p: _bb_pct(d['close'], p['period'], p.get('std_dev', 2.0)))
+register('bb_width',          lambda d, p: _bb_width(d['close'], p['period'], p.get('std_dev', 2.0)))
+register('volume_ratio',      lambda d, p: _volume_ratio(d['volume'], p['period']))
+register('drawdown',          lambda d, p: _drawdown(d['close'], p['period']))
+register('drawdown_recovery', lambda d, p: _drawdown_recovery(d['close'], p['short'], p['long']))
+register('roc',               lambda d, p: _roc(d['close'], p['period']))
+register('roc_spread',        lambda d, p: _roc_spread(d['close'], p['fast'], p['slow']))
+register('dxy_ret',           lambda d, p: _dxy_ret(d['dxy'], p['period']))
+register('dxy_ma_ratio',      lambda d, p: _dxy_ma_ratio(d['dxy'], p['period']))
+register('time_of_day',       lambda d, p: _time_of_day(d))
+register('day_of_week',       lambda d, p: _day_of_week(d))
+register('vix_level',         lambda d, p: _vix_level(d))
+register('vix_ma_ratio',      lambda d, p: _vix_ma_ratio(d, p['period']))
+register('vix_ret',           lambda d, p: _vix_ret(d, p['period']))
+register('tnx_level',         lambda d, p: _tnx_level(d))
+register('tnx_ma_ratio',      lambda d, p: _tnx_ma_ratio(d, p['period']))
+register('tnx_ret',           lambda d, p: _tnx_ret(d, p['period']))

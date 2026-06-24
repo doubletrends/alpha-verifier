@@ -1,7 +1,7 @@
 # Agent Loop — Procedure
 
 Purely procedural. Follow these steps in order each session.
-Pass `--workspace <name>` to all commands (e.g. `--workspace nasdaq_hourly_24hrs`).
+Pass `--workspace <name>` to all commands.
 
 ---
 
@@ -11,7 +11,7 @@ Pass `--workspace <name>` to all commands (e.g. `--workspace nasdaq_hourly_24hrs
 python run.py --workspace <name> --status
 ```
 
-Read the table. Pick the next family with `pending > 0` that has not been worked on yet. Prefer families in this order: work through seed families before moving to derived-only families.
+Read the table. Pick the next family with `pending > 0`. Prefer seed families before derived-only families.
 
 ---
 
@@ -21,7 +21,7 @@ Read the table. Pick the next family with `pending > 0` that has not been worked
 python run.py --workspace <name> --family <family>
 ```
 
-This runs all pending seed nodes in the family and writes:
+Writes:
 - `workspaces/<name>/<family>/<node_id>.xlsx` — the matrix
 - `workspaces/<name>/<family>/log.jsonl` — metadata + base rates
 
@@ -33,32 +33,25 @@ This runs all pending seed nodes in the family and writes:
 python run.py --workspace <name> --read <node_id>
 ```
 
-Each xlsx has three tabs:
-- `base_rate` — unconditional P(price_up) per horizon (reference)
-- `above` — P(price_up | feature > threshold), first row = base rate
-- `below` — P(price_up | feature < threshold), first row = base rate
-
-Read the `above` and `below` tabs. Compare each cell against the **base rate row at the top of the same tab**.
+Prints significant rows from the `above` and `below` tabs. All values are deviations from the base rate — 0 = no edge.
 
 ---
 
 ## 3. Assess edge
 
-The base rate is the unconditional win rate at each horizon. **Never treat any value above 50% as edge on its own.** The relevant comparison is always conditional vs. base rate.
-
 A condition shows **meaningful edge** when:
-- It deviates from base rate by **> 10pp** (positive or negative) on at least one horizon
-- The deviation is **consistent across consecutive horizons** (not a single spike)
-- The sample size `n` is **≥ 50**
+- Deviates from base rate by **> 10pp** on at least one horizon
+- Deviation is **consistent across consecutive horizons** (not a single spike)
+- Sample size `n` **≥ 50**
 
-A condition that is within ±10pp of base rate across all horizons — record it and move on.
+Within ±10pp across all horizons — record it and move on.
 
 ---
 
 ## 4. Decide: derive or exhaust
 
 **Derive** if any of the following are true:
-- One seed showed meaningful edge → test parameter variants (e.g. RSI14 showed edge → try RSI10, RSI18)
+- A seed showed meaningful edge → test parameter variants (e.g. RSI14 showed edge → try RSI10, RSI18)
 - Two seeds show opposing behavior → test their spread or ratio
 - A seed shows edge only in extreme quantiles → test a normalized distance-from-extreme feature
 - A pattern is visible but noisy → test a smoothed version
@@ -66,44 +59,46 @@ A condition that is within ±10pp of base rate across all horizons — record it
 **Exhaust** if:
 - All seeds are coinflips with no consistent pattern
 - All reasonable derivatives have been tested and none improve on seeds
-- You have tested ≥ 3 derived features with no meaningful edge found
+- ≥ 3 derived features tested with no meaningful edge found
 
-When exhausted, go to step 5 before moving to the next family.
+When exhausted, go to step 5 before picking the next family.
 
 ---
 
 ## 5. Record findings
 
-After exhausting a family, update `workspaces/<name>/findings.json`:
+Run `--findings` to auto-populate `best_node`, `peak_signal`, `verdict`, and `conditions` for every tested family:
 
-```json
-{
-  "rsi": {
-    "verdict": "strong",
-    "best_node": "rsi_18",
-    "key_finding": "RSI > 87 → +20pp at pivot horizon; deep oversold bounces short-term then reverses",
-    "notes": "rsi_divergence_7_14 shows strong mean-reversion character"
-  }
-}
+```
+python run.py --workspace <name> --findings
 ```
 
-`verdict` should be one of: `strong`, `moderate`, `weak`, `redundant`.
+Then open `workspaces/<name>/findings.json` and add qualitative `notes` for this family — what the pattern means, what to watch for, cross-family observations. The `notes` field is preserved on every subsequent `--findings` run.
 
-Then return to step 0 and pick the next family.
+Return to step 0 and pick the next family.
 
 ---
 
 ## 6. Add a derived feature
 
-**Step 6a — Write the feature function** into `data/features.py`:
+**Step 6a — Register the feature.**
+
+If the feature is specific to this workspace, add it to `workspaces/<name>/plugin.py`:
 
 ```python
-def _my_new_feature(close: pd.Series, ...) -> pd.Series:
-    ...
-    return result
+from data import features
 
-# Add to the dispatch dict inside compute():
-'my_new_feature': lambda: _my_new_feature(c, p['param1'], ...),
+def _my_feature(data, period): ...
+
+features.register('my_feature', lambda d, p: _my_feature(d, p['period']))
+```
+
+If the feature is cross-asset (useful across workspaces), add it to `data/features.py`:
+
+```python
+def _my_feature(close: pd.Series, period: int) -> pd.Series: ...
+
+register('my_feature', lambda d, p: _my_feature(d['close'], p['period']))
 ```
 
 **Step 6b — Append the node** to `workspaces/<name>/universe.json` under the correct family:
@@ -133,37 +128,27 @@ Then return to step 2.
 
 ## 7. After all families exhausted — probe and backtest
 
-Once `--status` shows 0 pending across all families, run the combined signal probe:
+Once `--status` shows 0 pending across all families:
 
 ```
 python run.py --workspace <name> --probe
-```
-
-This selects the best node per family (by peak |pivot-horizon| edge), evaluates current feature values, and outputs a Naive Bayes combined probability estimate across all families.
-
-Then run the historical backtest:
-
-```
 python run.py --workspace <name> --backtest
+python run.py --workspace <name> --findings
 ```
 
-This backtests the combined signal on sampled dates across the full history, bucketed by model edge, to validate whether the combined signal has directional accuracy.
+`--probe` evaluates current feature values and outputs a Naive Bayes combined P(up) estimate.
+`--backtest` validates directional accuracy on sampled historical dates, bucketed by model edge.
+`--findings` writes the final structured record for the completed workspace.
 
 ---
 
 ## Key file locations
 
 | Path | Purpose |
-|---|---|
+|------|---------|
 | `workspaces/<name>/universe.json` | Master node list — add derived nodes here |
-| `workspaces/<name>/findings.json` | Human-readable family verdicts and key findings |
-| `data/features.py` | Feature functions — add new ones here |
+| `workspaces/<name>/findings.json` | Family verdicts — machine-generated, human-annotated |
+| `workspaces/<name>/plugin.py` | Workspace-specific features and data sources |
 | `workspaces/<name>/<family>/` | Matrix xlsx files + per-family log |
-| `run.py` | CLI — `--family`, `--node`, `--status`, `--list`, `--read`, `--probe`, `--backtest` |
-
-## Available workspaces
-
-| Workspace | Asset | Interval | Horizons | Data sources |
-|---|---|---|---|---|
-| `btc_daily_14days` | BTC-USD | 1d | +1d → +14d | ohlcv, dxy, coinmetrics |
-| `nasdaq_hourly_24hrs` | ^IXIC | 1h | +1h → +24h | ohlcv, vix, treasury |
+| `data/features.py` | Cross-asset feature registry |
+| `data/fetcher.py` | Cross-asset source registry |

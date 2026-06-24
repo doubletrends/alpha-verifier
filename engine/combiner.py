@@ -15,14 +15,20 @@ import openpyxl
 _PDF_SHEET    = 'P(up | X ≈ x) - P(up)'
 _PDF_HDR_ROW  = 5   # pandas header at Excel row 5 (startrow=4, empty row 4)
 _PDF_DATA_ROW = 6   # data starts at Excel row 6
-_KEY_HORIZONS = ['+3d', '+7d', '+14d']
 
 _SHRINK_FLOOR = 30   # bins with n < 30 contribute zero (CLT floor)
 _SHRINK_N0    = 50   # excess observations needed to reach half-weight above the floor
 
 
 def shrink_weight(n) -> float:
-    """Two-part shrinkage: zero below floor, smooth ramp above."""
+    """
+    Two-part shrinkage weight for a bin with n observations.
+
+      n < FLOOR          → 0.0  (below CLT floor; ignore entirely)
+      n ≥ FLOOR          → excess / (excess + N0)   where excess = n − FLOOR
+
+    Shape: 0 at n=FLOOR, 0.5 at n=FLOOR+N0, asymptotes to 1 as n→∞.
+    """
     n = int(n) if pd.notna(n) else 0
     if n < _SHRINK_FLOOR:
         return 0.0
@@ -83,45 +89,36 @@ def eval_at(fn_table: pd.DataFrame, x: float) -> pd.Series:
     return fn_table.iloc[i] * (1.0 - t) + fn_table.iloc[i + 1] * t
 
 
-def _parse_n_min(val) -> int:
-    """Parse the minimum n from a range string like '4093~4080', or a plain integer."""
-    s = str(val)
-    return int(s.split('~')[0]) if '~' in s else int(float(s))
-
-
 def peak_signal(fn_table: pd.DataFrame, horizon: str = '+7d', min_n: int = 30) -> float:
     """Max absolute deviation at horizon, restricted to slices with n >= min_n."""
     if horizon not in fn_table.columns:
         return 0.0
-    mask = fn_table['n'].apply(_parse_n_min) >= min_n if 'n' in fn_table.columns else pd.Series(True, index=fn_table.index)
+    mask = (fn_table['n'] >= min_n) if 'n' in fn_table.columns else pd.Series(True, index=fn_table.index)
     vals = fn_table.loc[mask, horizon].dropna()
     return float(vals.abs().max()) if len(vals) > 0 else 0.0
 
 
-def best_x(fn_table: pd.DataFrame, horizon: str = '+7d', min_n: int = 30) -> tuple:
-    """Return (x_optimal, max_deviation) maximising P(up) at horizon."""
-    if horizon not in fn_table.columns:
-        return (np.nan, np.nan)
-    mask = (fn_table['n'] >= min_n) if 'n' in fn_table.columns else pd.Series(True, index=fn_table.index)
-    col  = fn_table.loc[mask, horizon].dropna()
-    if col.empty:
-        return (np.nan, np.nan)
-    idx = col.idxmax()
-    return (float(idx), float(col.loc[idx]))
-
-
 def combine(
-    contributions: list,            # [(node_id: str, devs: pd.Series), ...]  devs index = horizon labels
+    contributions: list,            # [(node_id: str, devs: pd.Series), ...]
     base_rate:     pd.Series,       # index = horizon labels, values in %
-    horizons:      list = None,
+    horizons:      list,
     weights:       dict | None = None,  # {node_id: float} shrinkage weights; default = 1.0 for all
 ) -> pd.DataFrame:
     """
-    Naive-Bayes log-odds combination.
-    Returns DataFrame with index=horizons, columns=node_ids + ['combined', 'edge', 'base_rate'].
+    Naive-Bayes log-odds combination across signal families.
+
+    Each entry in contributions is (node_id, devs) where devs is a Series
+    indexed by horizon label (e.g. '+7d') with values in percentage-point
+    deviation from base rate — i.e. P(up | feature ≈ x) − base_rate, as
+    stored in the PDF sheet of the node xlsx.
+
+    Formula per horizon h:
+        lo = logodds(base_rate_h)
+           + Σ_i  w_i · [logodds(base_rate_h + dev_i_h) − logodds(base_rate_h)]
+        combined_h = sigmoid(lo) × 100
+
+    Returns DataFrame indexed by horizon labels, columns = ['base_rate'] + node_ids + ['combined', 'edge'].
     """
-    if horizons is None:
-        horizons = _KEY_HORIZONS
     node_ids = [nid for nid, _ in contributions]
 
     records = {}
