@@ -21,7 +21,17 @@ def fetch(sources: list[str], start: str, asset: dict) -> pd.DataFrame:
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+def _clamp_intraday_start(start: str, interval: str) -> str:
+    """Yahoo only serves hourly data for the trailing 730 days; requests reaching
+    further back fail entirely, so clamp the start into the allowed window."""
+    if not any(c in interval for c in ('h', 'm')):
+        return start
+    earliest = pd.Timestamp.now().normalize() - pd.Timedelta(days=728)
+    return max(pd.Timestamp(start), earliest).strftime('%Y-%m-%d')
+
+
 def _yfinance_ohlcv(ticker: str, interval: str, start: str) -> pd.DataFrame:
+    start = _clamp_intraday_start(start, interval)
     df = yf.download(ticker, start=start, interval=interval, auto_adjust=False, progress=False)
     if hasattr(df.columns, 'nlevels') and df.columns.nlevels > 1:
         df.columns = df.columns.get_level_values(0)
@@ -38,6 +48,7 @@ def _yfinance_ohlcv(ticker: str, interval: str, start: str) -> pd.DataFrame:
 
 def _yfinance_cross(ticker: str, col_name: str, interval: str, start: str) -> pd.DataFrame:
     """Fetch a single-column cross-asset series (VIX, yields, etc.)."""
+    start = _clamp_intraday_start(start, interval)
     df = yf.download(ticker, start=start, interval=interval, auto_adjust=False, progress=False)
     if hasattr(df.columns, 'nlevels') and df.columns.nlevels > 1:
         df.columns = df.columns.get_level_values(0)
