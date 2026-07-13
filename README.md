@@ -65,7 +65,7 @@ Observation counts throughout report the longest-horizon count, which is the mos
 
 For each family, `--probe` selects the single node with the highest peak absolute deviation at the pivot horizon (subject to $n \geq 30$ slices), then combines the survivors in log-odds space. Assuming the features are conditionally independent given the outcome, the combined estimate at horizon $h$ is
 
-$$ \operatorname{logit} p_\text{comb}(h) = \operatorname{logit} p_0(h) + \sum_i w_i \Big[\operatorname{logit}\big(p_0(h) + \delta_i(h)\big) - \operatorname{logit} p_0(h)\Big], $$
+$$ \mathrm{logit}\,p_\text{comb}(h) = \mathrm{logit}\,p_0(h) + \sum_i w_i \Big[\mathrm{logit}\big(p_0(h) + \delta_i(h)\big) - \mathrm{logit}\,p_0(h)\Big], $$
 
 where $\delta_i(h)$ is family $i$'s local deviation at the current feature value and $p_\text{comb}$ is recovered with the logistic $\sigma$. The independence assumption is deliberately optimistic — correlated signals (e.g. RSI and Williams %R measure nearly the same thing) will inflate the combined edge, and the tool flags this explicitly in its output.
 
