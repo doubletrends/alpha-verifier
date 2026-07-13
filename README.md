@@ -3,7 +3,7 @@
 ![NumPy](https://img.shields.io/badge/NumPy-v2.0-013243?logo=numpy&logoColor=white)
 ![pandas](https://img.shields.io/badge/pandas-v2.2-150458?logo=pandas&logoColor=white)
 
-# Empirical Winning-Condition Testing Pipeline
+# Empirical Winning-Condition Testing Pipeline on Any Financial Asset
 
 An agentic, fully automatic pipeline that batch-tests empirical *winning conditions* on any financial asset. You declare a universe of conditions — each a feature $X$ (RSI, moving-average deviation, realized volatility, on-chain valuation, …) paired with a forward horizon $h$ — and an agent drives the pipeline through every one against history, unattended, computing:
 
