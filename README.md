@@ -11,7 +11,7 @@ $$ P\big(\text{price}_{t+h} > \text{price}_t \mid X_t \in \text{condition}\big) 
 
 That is: conditioned on the feature, how much does the probability of an up-move deviate from its unconditional baseline? There is no fitted model and no forecast in the machine-learning sense — only conditional counting over the historical record, run in batch across hundreds of feature-and-parameter combinations and then reduced to a single estimate via shrinkage-weighted Naive Bayes.
 
-The pipeline is organized around **workspaces**, each pairing one asset and sampling interval with its own feature universe. Two are included: `btc_daily_14days` (Bitcoin, daily bars, $+1$ to $+14$ day horizons) and `nasdaq_hourly_24hrs` (NASDAQ Composite, hourly bars, $+1$ to $+24$ hour horizons).
+The pipeline is organized around **workspaces**, each pairing one asset and sampling interval with its own feature universe. Two are included: `btc_daily_14days` (Bitcoin, daily bars, +1 to +14 day horizons) and `nasdaq_hourly_24hrs` (NASDAQ Composite, hourly bars, +1 to +24 hour horizons).
 
 * * *
 
@@ -73,7 +73,7 @@ where $\delta_i(h)$ is family $i$'s local deviation at the current feature value
 
 Thin slices are down-weighted so a handful of coincidental observations cannot dominate. With a CLT floor at $n_0 = 30$ and half-weight scale $N_0 = 50$:
 
-$$ w(n) = \begin{cases} 0 & n < 30 \\[4pt] \dfrac{n - 30}{(n - 30) + 50} & n \geq 30 \end{cases} $$
+$$ w(n) = \begin{cases} 0 & n < 30 \\ \dfrac{n - 30}{(n - 30) + 50} & n \geq 30 \end{cases} $$
 
 The weight is $0$ at the floor, $0.5$ at $n = 80$, and asymptotes to $1$ as $n \to \infty$.
 
@@ -154,8 +154,8 @@ A workspace is defined entirely by `universe.json`. Key `meta` fields:
 
 | Workspace | Asset | Interval | Horizons | History | Extras |
 |-----------|-------|----------|----------|---------|--------|
-| `btc_daily_14days` | BTC-USD | 1d | $+1$…$+14$ d | from 2015 | CoinMetrics on-chain, halving-cycle features |
-| `nasdaq_hourly_24hrs` | ^IXIC | 1h | $+1$…$+24$ h | trailing ~730 d | VIX / treasury cross-asset, time-of-day |
+| `btc_daily_14days` | BTC-USD | 1d | +1…+14 d | from 2015 | CoinMetrics on-chain, halving-cycle features |
+| `nasdaq_hourly_24hrs` | ^IXIC | 1h | +1…+24 h | trailing ~730 d | VIX / treasury cross-asset, time-of-day |
 
 ### 5.1 Built-in data sources
 
@@ -202,13 +202,13 @@ Root code is never touched. Reference new sources in a node definition via `"dat
 
 Findings are batch-generated: any asset reachable through the data layer can be dropped into a workspace and scanned end-to-end with no changes to the engine. To illustrate that capability across asset classes and timeframes, we ran two workspaces — Bitcoin on daily bars and the NASDAQ Composite on hourly bars — and summarize the per-family findings each produced. All figures are deviations from the unconditional base rate $p_0$ in percentage points (pp); $n$ is the longest-horizon observation count. The pipeline evaluates every family and records it whether or not an edge is found.
 
-### 7.1 Bitcoin (BTC-USD, daily, $+1$ to $+14$ d)
+### 7.1 Bitcoin (BTC-USD, daily, +1 to +14 d)
 
 The largest and most horizon-persistent edges came from **valuation and volatility extremes** rather than oscillators. Deep undervaluation on the on-chain MVRV ratio ($X < 0.79$, $n = 85$) preceded up-moves at $+12.6$ / $+23.0$ / $+34.3$ pp above baseline at the $+3$ / $+7$ / $+14$ day horizons — the strongest single edge in the universe — while the symmetric euphoria condition ($X > 3.3$) reached $-13.9$ pp at $+14$ d. Volatility compression showed the same monotonic-in-horizon shape: 21-day realized volatility below $19$ ($n = 190$) preceded $+11.3$ / $+18.0$ / $+19.5$ pp. Both strengthen with horizon, consistent with slow mean reversion rather than short-term timing.
 
 **Overextension** carried the opposite sign: price more than $72\%$ above its 100-day moving average ($n = 83$) preceded $-20.1$ pp at $+14$ d, and price stretched more than $33\%$ below it preceded $+14.8$ pp — reversion visible from both tails. Momentum, in contrast, showed **continuation**: 5-day rate-of-change above $0.14$ ($n = 241$) preceded $+8.2$ / $+12.2$ / $+13.9$ pp, building over the horizon. Elevated 7-day volume was **short-lived** ($+12.2$ pp at $+3$ d fading to $+6.8$ pp by $+14$ d), and the stochastic, Williams %R, and RSI families were largely **redundant**, producing near-identical surfaces with no incremental value recorded for the stochastic family over RSI.
 
-### 7.2 NASDAQ Composite (^IXIC, hourly, $+1$ to $+24$ h)
+### 7.2 NASDAQ Composite (^IXIC, hourly, +1 to +24 h)
 
 On intraday NASDAQ data the dominant edges were **cross-asset and volatility-driven**. The 10-year treasury yield gave the single strongest signal — a low-rate regime ($X < 3.73\%$, $n = 63$) preceded $+12.8$ / $+21.5$ / $+22.9$ / $+38.7$ pp at $+3$ / $+6$ / $+12$ / $+24$ h — though, over a window covering only 2024-07 onward, this is best read as a regime marker than a repeatable trigger. VIX behaved as a clean leading indicator: hourly VIX spikes preceded an immediate NASDAQ drop, while an elevated VIX level relative to its moving average ($n = 187$) preceded a $+10.9$ pp recovery by $+24$ h. Bollinger band width was the sharpest volatility signal, and asymmetric: band expansion preceded up to $+21.9$ pp at $+24$ h, whereas extreme compression preceded $-45.2$ pp — volatility expansion as bullish continuation, compression as a bearish trap.
 
