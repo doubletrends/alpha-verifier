@@ -14,6 +14,29 @@ SHEET_PDF   = 'P(up | X ≈ x) - P(up)'
 SHEET_ABOVE = 'P(up | X > x) - P(up)'
 SHEET_BELOW = 'P(up | X < x) - P(up)'
 
+# Sheet names carry the event symbol so two outcomes never collide in one workbook,
+# while the default 'up' reproduces the historical names exactly — existing node
+# xlsx files keep loading unchanged.
+_MARKS = {'pdf': '≈', 'above': '>', 'below': '<'}
+
+
+def sheet_names(event: str = 'up') -> dict[str, str]:
+    """The three sheet names for an event symbol, keyed 'pdf' / 'above' / 'below'."""
+    return {k: f'P({event} | X {m} x) - P({event})' for k, m in _MARKS.items()}
+
+
+def find_sheet(wb, kind: str):
+    """
+    Locate a sheet by kind ('pdf' / 'above' / 'below') regardless of which outcome
+    wrote it. Readers match on the comparison mark rather than the full name, so a
+    workbook produced under any outcome stays readable.
+    """
+    mark = _MARKS[kind]
+    for name in wb.sheetnames:
+        if name.startswith('P(') and f' X {mark} x)' in name:
+            return wb[name]
+    raise KeyError(f"no '{kind}' sheet in workbook (sheets: {wb.sheetnames})")
+
 # Excel row layout:
 #   rows 1-3  : header block (title, formula, description)
 #   row 4     : empty (spacer, written by to_excel startrow offset)
@@ -142,8 +165,13 @@ def write_xlsx(
     base_rate: pd.DataFrame,
     path:      Path,
     node_id:   str,
+    event:     str = 'up',
+    title:     str = 'Winrate',
+    expr:      str = 'price_h0+h > price_h0',
 ) -> None:
     label     = _feature_label(node_id)
+    sheets    = sheet_names(event)
+    SHEET_PDF, SHEET_ABOVE, SHEET_BELOW = sheets['pdf'], sheets['above'], sheets['below']
     dev_above = _subtract_base(p_above, base_rate)
     dev_below = _subtract_base(p_below, base_rate)
     fn_df     = _local_function(p_above, base_rate)
@@ -164,27 +192,27 @@ def write_xlsx(
         wb = writer.book
 
         _write_headers(wb[SHEET_PDF],
-            f'Conditional Winrate on {label} — Probability Density Function (PDF)',
-            f'P(price_h0+h > price_h0 | {label} ≈ x) - P(price_h0+h > price_h0)',
-            f'Measures the winrate at horizon h, given that {label} is approximately at value x, minus the unconditional baseline winrate.',
+            f'Conditional {title} on {label} — Probability Density Function (PDF)',
+            f'P({expr} | {label} ≈ x) - P({expr})',
+            f'Measures P({expr}) at horizon h, given that {label} is approximately at value x, minus the unconditional base rate.',
             merge_end=merge_end,
         )
         _format_cells(wb[SHEET_PDF], n_pdf, n_horizons, data_row=_DATA_ROW)
         _color_scale( wb[SHEET_PDF], n_pdf, n_horizons, data_row=_DATA_ROW)
 
         _write_headers(wb[SHEET_ABOVE],
-            f'Conditional Winrate on {label} — Cumulative Distribution Function (CDF)',
-            f'P(price_h0+h > price_h0 | {label} > x) - P(price_h0+h > price_h0)',
-            f'Measures the winrate at horizon h, given that {label} is above threshold x, minus the unconditional baseline winrate.',
+            f'Conditional {title} on {label} — Cumulative Distribution Function (CDF)',
+            f'P({expr} | {label} > x) - P({expr})',
+            f'Measures P({expr}) at horizon h, given that {label} is above threshold x, minus the unconditional base rate.',
             merge_end=merge_end,
         )
         _format_cells(wb[SHEET_ABOVE], n_cdf, n_horizons, data_row=_DATA_ROW)
         _color_scale( wb[SHEET_ABOVE], n_cdf, n_horizons, data_row=_DATA_ROW)
 
         _write_headers(wb[SHEET_BELOW],
-            f'Conditional Winrate on {label} — Cumulative Distribution Function (CDF)',
-            f'P(price_h0+h > price_h0 | {label} < x) - P(price_h0+h > price_h0)',
-            f'Measures the winrate at horizon h, given that {label} is below threshold x, minus the unconditional baseline winrate.',
+            f'Conditional {title} on {label} — Cumulative Distribution Function (CDF)',
+            f'P({expr} | {label} < x) - P({expr})',
+            f'Measures P({expr}) at horizon h, given that {label} is below threshold x, minus the unconditional base rate.',
             merge_end=merge_end,
         )
         _format_cells(wb[SHEET_BELOW], n_cdf, n_horizons, data_row=_DATA_ROW)

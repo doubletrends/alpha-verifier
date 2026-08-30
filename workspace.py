@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 
 from tree.tree import load_tree
+from engine import outcomes
 
 
 class Workspace:
@@ -28,6 +29,22 @@ class Workspace:
 
         self._load_plugin()
 
+        # The outcome is loaded after the plugin so a workspace can register its own.
+        oc = meta.get('outcome', {'name': 'up', 'params': {}})
+        self.set_outcome(oc.get('name', 'up'), oc.get('params') or {})
+
+    def set_outcome(self, name: str, params: dict | None = None) -> None:
+        """Point the workspace at a different outcome (used by --outcome)."""
+        self.outcome        = name
+        self.outcome_params = params or {}
+        self.outcome_spec   = outcomes.get(name)
+        self.event          = outcomes.event_label(name, self.outcome_params)
+        self.outcome_expr   = outcomes.describe(name, self.outcome_params)
+
+    @property
+    def is_default_outcome(self) -> bool:
+        return self.outcome == 'up'
+
     def _load_plugin(self) -> None:
         plugin_path = self.dir / 'plugin.py'
         if not plugin_path.exists():
@@ -48,6 +65,16 @@ class Workspace:
 
     def output_dir(self, family: str) -> Path:
         return self.dir / family
+
+    def output_path(self, family: str, node_id: str) -> Path:
+        """
+        Where a node's xlsx lives. The default 'up' outcome keeps the historical
+        flat path so the 65 existing files stay in place; every other outcome gets
+        its own subdirectory, so outcomes never overwrite one another.
+        """
+        if self.is_default_outcome:
+            return self.dir / family / f'{node_id}.xlsx'
+        return self.dir / family / self.event / f'{node_id}.xlsx'
 
     def family_log(self, family: str) -> Path:
         return self.dir / family / 'log.jsonl'

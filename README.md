@@ -61,7 +61,7 @@ Observation counts throughout report the longest-horizon count, which is the mos
 
 * * *
 
-## 2. Signal Combination (Naive Bayes over Families)
+## 2. Signal Combination and Validation
 
 For each family, `--probe` selects the single node with the highest peak absolute deviation at the pivot horizon (subject to $n \geq 30$ slices), then combines the survivors in log-odds space. Assuming the features are conditionally independent given the outcome, the combined estimate at horizon $h$ is
 
@@ -79,6 +79,66 @@ The weight is $0$ at the floor, $0.5$ at $n = 80$, and asymptotes to $1$ as $n \
 
 * * *
 
+### 2.2 Shuffle-null validation
+
+A node's headline number is the peak absolute deviation across ~30 threshold bins. That
+statistic is a **maximum over many noisy estimates**, so it is biased upward even when the
+feature carries no information at all: with $n \approx 50$ observations in a bin the standard
+error of a rate is $\sqrt{0.25/50} \approx 7$ pp, and the maximum over 30 such bins lands near
+10 pp by construction. Comparing a peak against a fixed pp threshold therefore cannot separate
+signal from noise — it mostly measures how many bins were searched.
+
+`--validate` builds the null distribution of that same statistic directly. The outcome series is
+circularly shifted against the feature many times; each shift preserves the autocorrelation of
+both series — which matters, because overlapping $h$-bar outcomes are strongly serially
+correlated — while destroying any real alignment between them. The node's real peak is then read
+as a quantile of that null:
+
+$$ p = \frac{1 + \#\{\text{shifts with peak} \geq \text{real peak}\}}{1 + n_\text{shifts}} $$
+
+The add-one estimator (Davison & Hinkley) keeps $p$ strictly positive: the observed statistic is
+itself one draw from the null, so $p = 0$ is never a valid conclusion. Its floor, $1/(n_\text{shifts}+1)$,
+is also the resolution limit — a sweep of $k$ tests needs a Bonferroni $\alpha/k$, and no number
+below the floor can be resolved. Verdicts reflect this explicitly:
+
+| Verdict | Meaning |
+|---------|---------|
+| `structure` | Clears $\alpha/k$; survives correction for the size of the search |
+| `nominal` | Clears $\alpha$ alone — what a single-node view would call an edge |
+| `underpowered` | Sits at the resolution floor; might clear $\alpha/k$, but this many shifts cannot show it |
+| `noise` | Indistinguishable from the null |
+
+Results are written to `validation.json` (or `validation.<event>.json` for a non-default outcome).
+Re-running with `--families` **merges** into that file rather than replacing it, and the Bonferroni
+denominator is taken over every test the file contains — narrowing the run must not quietly shrink
+the correction for a search that was already made wide.
+
+* * *
+
+### 2.3 Outcomes
+
+The engine measures $P(\text{outcome} \mid X \in \text{condition}) - P(\text{outcome})$. The
+outcome was historically fixed to "price rose over the next $h$ bars"; it is now pluggable, so the
+same conditional-counting machinery can be aimed at events where the structure is stronger.
+
+| `--outcome` | Event | Default base rate (BTC, +14d) |
+|-------------|-------|------------------------------|
+| `up` | $\text{close}_{t+h} > \text{close}_t$ — the original, still the default | 56.5% |
+| `drawdown` | $\min(\text{close}_{t+1..t+h}) / \text{close}_t - 1 < -\theta$ — a peak-to-trough loss from $t$, not merely a lower close at $t+h$ | 21.7% ($\theta = 0.10$) |
+| `runup` | Mirror of `drawdown`: a gain exceeding $+\theta$ at any point within $h$ | — |
+| `vol_high` | Realized volatility over $(t, t+h]$ exceeded its own trailing median. The reference median is built from *backward*-looking $h$-bar volatility only, so nothing unavailable at $t$ enters the comparison | 47.4% |
+
+`--threshold` sets $\theta$ for `drawdown` / `runup` (default `0.10`). Outcomes are a registry
+like features and data sources, so a workspace plugin can call `outcomes.register(...)` at import
+time with no root edits.
+
+Node status (`pending` / `tested`) tracks the **default outcome only**. Under any other outcome
+the engine writes to a per-event subdirectory (`<family>/dd10/<node>.xlsx`), leaves node status
+untouched, and `--family` targets every node in the family rather than only pending ones — so the
+65 existing surfaces stay exactly where they are and no two outcomes overwrite each other.
+
+* * *
+
 ## 3. Repository Structure
 
 Adding a workspace requires **no changes to root code**. Root code owns the stable engine contracts; each workspace owns everything specific to its asset.
@@ -91,8 +151,10 @@ data/
   fetcher.py         ← SourceRegistry:  register_source() / fetch()
 engine/
   matrix.py          ← base rate + conditional CDF surfaces
+  outcomes.py        ← OutcomeRegistry: the event being measured (up / drawdown / vol)
   writer.py          ← xlsx rendering, colour scales, PDF recovery
   combiner.py        ← Naive Bayes log-odds combination + shrinkage
+  validate.py        ← circular-shift null test + Bonferroni verdicts
 tree/
   tree.py            ← node traversal over universe.json
 workspaces/
@@ -100,6 +162,7 @@ workspaces/
     universe.json    ← asset, horizons, feature families, all config
     plugin.py        ← (optional) custom features and data sources
     findings.json    ← structured per-family verdicts, written by --findings
+    validation.json  ← per-node null-test p-values and verdicts, written by --validate
 ```
 
 Both the feature layer and the data-source layer are registries: a plugin calls `register()` / `register_source()` at import time and the engine picks it up with no root edits.
@@ -118,6 +181,9 @@ python run.py --workspace btc_daily_14days --read rsi_14
 python run.py --workspace btc_daily_14days --probe
 python run.py --workspace btc_daily_14days --backtest
 python run.py --workspace btc_daily_14days --findings
+python run.py --workspace btc_daily_14days --validate
+python run.py --workspace btc_daily_14days --validate --outcome drawdown --threshold 0.10
+python run.py --workspace btc_daily_14days --family ma --outcome drawdown
 ```
 
 | Command | Stage | Output |
@@ -132,8 +198,11 @@ python run.py --workspace btc_daily_14days --findings
 | `--probe` | Combine | Current $P(\text{up})$ estimate — best node per family, Naive Bayes combined |
 | `--backtest` | Validate | Walk-forward directional accuracy of the combined signal, bucketed by model edge |
 | `--findings` | Report | Writes `findings.json` — structured verdict per family |
+| `--validate` | Falsify | Shuffle-null test of every tested node; writes `validation.json` |
 
-`--families a,b,c` narrows `--probe` / `--backtest` to a subset of families.
+`--families a,b,c` narrows `--probe` / `--backtest` / `--validate` to a subset of families.
+`--outcome <name>` (with `--threshold` where applicable) re-aims any compute or reporting
+command at a different event; `--shifts N` sets the resampling depth for `--validate`.
 
 * * *
 
@@ -151,6 +220,7 @@ A workspace is defined entirely by `universe.json`. Key `meta` fields:
 | `sample_freq` | pandas offset for backtest sampling — `MS` (monthly) for daily, `W-MON` (weekly) for intraday |
 | `min_obs` | Minimum valid observations required to run a node |
 | `read_min_dev`, `read_min_n` | Thresholds for a row to count as "significant" in `--read` |
+| `outcome` | `{name, params}` — the event to measure; defaults to `{"name": "up"}` |
 
 | Workspace | Asset | Interval | Horizons | History | Extras |
 |-----------|-------|----------|----------|---------|--------|
@@ -200,19 +270,99 @@ Root code is never touched. Reference new sources in a node definition via `"dat
 
 ## 7. Results
 
-Findings are batch-generated: any asset reachable through the data layer can be dropped into a workspace and scanned end-to-end with no changes to the engine. To illustrate that capability across asset classes and timeframes, we ran two workspaces — Bitcoin on daily bars and the NASDAQ Composite on hourly bars — and summarize the per-family findings each produced. All figures are deviations from the unconditional base rate $p_0$ in percentage points (pp); $n$ is the longest-horizon observation count. The pipeline evaluates every family and records it whether or not an edge is found.
+Findings are batch-generated: any asset reachable through the data layer can be dropped into a
+workspace and scanned end-to-end with no changes to the engine. To exercise that across asset
+classes and timeframes we ran two workspaces — Bitcoin on daily bars and the NASDAQ Composite on
+hourly bars — and then put every node through `--validate`.
 
-### 7.1 Bitcoin (BTC-USD, daily, +1 to +14 d)
+Everything below is reported **against the null**, not against a fixed pp threshold. A peak
+deviation on its own is not evidence: the maximum over ~30 bins is biased upward even for an
+uninformative feature (§2.2), and for this universe the null median of that statistic is ~10 pp
+at +3d and ~17 pp at +14d — the same magnitude as most "edges" a naive read would report.
 
-The largest and most horizon-persistent edges came from **valuation and volatility extremes** rather than oscillators. Deep undervaluation on the on-chain MVRV ratio ($X < 0.79$, $n = 85$) preceded up-moves at $+12.6$ / $+23.0$ / $+34.3$ pp above baseline at the $+3$ / $+7$ / $+14$ day horizons — the strongest single edge in the universe — while the symmetric euphoria condition ($X > 3.3$) reached $-13.9$ pp at $+14$ d. Volatility compression showed the same monotonic-in-horizon shape: 21-day realized volatility below $19$ ($n = 190$) preceded $+11.3$ / $+18.0$ / $+19.5$ pp. Both strengthen with horizon, consistent with slow mean reversion rather than short-term timing.
+### 7.1 Direction is not predictable in either workspace
 
-**Overextension** carried the opposite sign: price more than $72\%$ above its 100-day moving average ($n = 83$) preceded $-20.1$ pp at $+14$ d, and price stretched more than $33\%$ below it preceded $+14.8$ pp — reversion visible from both tails. Momentum, in contrast, showed **continuation**: 5-day rate-of-change above $0.14$ ($n = 241$) preceded $+8.2$ / $+12.2$ / $+13.9$ pp, building over the horizon. Elevated 7-day volume was **short-lived** ($+12.2$ pp at $+3$ d fading to $+6.8$ pp by $+14$ d), and the stochastic, Williams %R, and RSI families were largely **redundant**, producing near-identical surfaces with no incremental value recorded for the stochastic family over RSI.
+| Workspace | Tests | `structure` | `nominal` (p<0.05) | Expected by chance |
+|-----------|-------|-------------|--------------------|--------------------|
+| `btc_daily_14days` | 195 | **0** | 14 | 9.8 |
+| `nasdaq_hourly_24hrs` | 132 | **0** | 5 | 6.6 |
 
-### 7.2 NASDAQ Composite (^IXIC, hourly, +1 to +24 h)
+Nothing survives Bonferroni correction in either. Bitcoin's 14 nominal hits against 9.8 expected
+is the excess a search of this size produces from noise alone; NASDAQ returns *fewer* nominal hits
+than chance would give. The strongest directional family per workspace:
 
-On intraday NASDAQ data the dominant edges were **cross-asset and volatility-driven**. The 10-year treasury yield gave the single strongest signal — a low-rate regime ($X < 3.73\%$, $n = 63$) preceded $+12.8$ / $+21.5$ / $+22.9$ / $+38.7$ pp at $+3$ / $+6$ / $+12$ / $+24$ h — though, over a window covering only 2024-07 onward, this is best read as a regime marker than a repeatable trigger. VIX behaved as a clean leading indicator: hourly VIX spikes preceded an immediate NASDAQ drop, while an elevated VIX level relative to its moving average ($n = 187$) preceded a $+10.9$ pp recovery by $+24$ h. Bollinger band width was the sharpest volatility signal, and asymmetric: band expansion preceded up to $+21.9$ pp at $+24$ h, whereas extreme compression preceded $-45.2$ pp — volatility expansion as bullish continuation, compression as a bearish trap.
+| Workspace | Family | Node | $h$ | Real | Null p95 | $p$ | Verdict |
+|-----------|--------|------|-----|------|----------|-----|---------|
+| BTC | ma | `ma_ratio_100` | +3d | 29.7 | 23.2 | 0.0026 | nominal |
+| BTC | volatility | `atr_14` | +14d | 38.7 | 32.8 | 0.0065 | nominal |
+| BTC | on_chain | `mvrv` | +14d | 34.2 | 35.6 | 0.081 | **noise** |
+| BTC | cycle | `days_since_halving` | +14d | 31.5 | 40.9 | 0.717 | **noise** |
+| NASDAQ | volatility | `bb_width_20` | +24h | 46.3 | 37.8 | 0.015 | nominal |
+| NASDAQ | treasury | `tnx_ret_1` | +3h | 21.9 | 21.4 | 0.045 | nominal |
 
-The momentum families (MACD, RSI, moving-average cross) all showed **continuation across every horizon** with no mean-reversion component; notably, overbought RSI stayed bullish here, the opposite of Bitcoin's mixed intraday-versus-longer-term behavior. Three families returned **no edge** above threshold — day-of-week, hour-of-day, and volume — the last a direct contrast with Bitcoin, where 7-day volume did carry a short-horizon edge. Taken together, the two workspaces show the same engine surfacing structurally different, asset-specific behavior from identical machinery.
+Two of these are worth naming because they were the headline results before validation. The MVRV
+valuation signal — deep on-chain undervaluation preceding up-moves at +34 pp over baseline at
++14d — is a genuinely large deviation, and it is *below* its own null p95 of 35.6: MVRV moves
+slowly enough that a 30-bin maximum on a 4,200-bar sample reaches that size by chance. The same
+holds for the halving-cycle features, where the null p95 reaches 40.9 pp. On the NASDAQ side the
+low-rate treasury regime, previously reported at +38.7 pp at +24h, survives only nominally over a
+window that is mostly one regime.
+
+### 7.2 Risk is predictable — the same features, a different question
+
+Re-aiming the identical 65 nodes at `--outcome drawdown --threshold 0.10` (a 10% peak-to-trough
+loss from $t$ within $h$ bars) inverts the picture. Same features, same history, same machinery,
+39,000 shifts, same $\alpha = 2.56 \times 10^{-4}$:
+
+| Outcome | `structure` | `nominal` | Expected by chance |
+|---------|-------------|-----------|--------------------|
+| `up` — direction | 0 / 195 | 14 / 195 | 9.8 |
+| `drawdown` — 10% loss within $h$ | **4** / 195 | **58** / 195 | 9.8 |
+
+58 nominal hits is a 5.9× excess over chance, and four tests clear Bonferroni outright:
+
+| Node | Family | $h$ | Real | Null p95 | $p$ |
+|------|--------|-----|------|----------|-----|
+| `bb_pct_20` | volatility | +3d | 27.7 | 9.4 | 0.00003 |
+| `bb_pct_20` | volatility | +7d | 29.2 | 13.6 | 0.00003 |
+| `drawdown_7` | drawdown | +3d | 24.8 | 9.9 | 0.00003 |
+| `ma_cross_7_21` | ma | +3d | 19.8 | 11.6 | 0.00013 |
+
+Nine of twelve families reach at least nominal significance on drawdown, against five on
+direction — and the drawdown p-values are three to four orders of magnitude smaller. The
+strongest single condition is monotone and large: price more than 120% above its 200-day moving
+average precedes a 10% drawdown within 14 days at **+39 pp over a 21.7% base rate** ($n = 82$),
+rising monotonically across every threshold beneath it.
+
+Note what does *not* transfer. The oscillator families that dominate technical-analysis folklore
+(`stoch`, `williams_r`) are the weakest on both outcomes, and `cycle` — the halving-phase overlay —
+is the single worst performer against the null on both. What carries the drawdown signal is
+volatility position (`bb_pct_20`), recent drawdown itself (`drawdown_7`), and trend structure
+(`ma_cross_7_21`, `ma_ratio_100`): volatility clustering and the leverage effect, both of which
+are well documented and neither of which arbitrage removes.
+
+### 7.3 Reading the two together
+
+The same features, machinery and history carry no usable information about *whether* price rises,
+and substantial information about *whether it falls hard*. That is the expected shape rather than
+a surprise: direction is the most competed-away quantity in a liquid market, while tail risk is
+driven by mechanisms that persist precisely because they are not arbitrageable in the same way.
+
+Two caveats bound the risk result:
+
+1. **The null is conservative, not liberal, here.** Circular shifting preserves each series' own
+   autocorrelation but not the joint regime structure, so a shift can align an early-cycle feature
+   with late-cycle outcomes. Where both series share a slow regime component — as they do for
+   crash risk — this inflates the null, so the drawdown result is if anything understated. A block
+   bootstrap would tighten it.
+2. **Significance is not tradability.** These are conditional probabilities measured in-sample
+   across the full history, not a walk-forward backtest with costs. `--backtest` remains the check
+   that a combined signal would have been usable in real time, and it is not run for the drawdown
+   outcome here.
+
+Per-family verdicts, p-values and null quantiles are written to `validation.json` and summarised
+into `findings.json` by `--findings`; `verdict` there is the null-test result, and a family with
+no validation sweep reports `unvalidated` rather than claiming an edge.
 
 * * *
 
@@ -226,6 +376,9 @@ The momentum families (MACD, RSI, moving-average cross) all showed **continuatio
 - Naive Bayes classification and the conditional-independence assumption — Hand & Yu (2001), *Idiot's Bayes — Not So Stupid After All?*, International Statistical Review 69(3)
 - Log-odds (logit) additivity of evidence — Good (1950), *Probability and the Weighing of Evidence*
 - Shrinkage / partial pooling of small-sample rates — Efron & Morris (1975), *Data Analysis Using Stein's Estimator and Its Generalizations*, JASA 70(350)
+- Add-one permutation p-values and resampling resolution — Davison & Hinkley (1997), *Bootstrap Methods and Their Application*, CUP, §4.2
+- Resampling that preserves serial dependence — Politis & Romano (1994), *The Stationary Bootstrap*, JASA 89(428)
+- Multiple testing over a searched universe of rules — White (2000), *A Reality Check for Data Snooping*, Econometrica 68(5)
 
 **Technical indicators**
 - Wilder (1978), *New Concepts in Technical Trading Systems* — RSI, ATR

@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 import openpyxl
 
-_PDF_SHEET    = 'P(up | X ≈ x) - P(up)'
+from engine import writer
+
 _PDF_HDR_ROW  = 5   # pandas header at Excel row 5 (startrow=4, empty row 4)
 _PDF_DATA_ROW = 6   # data starts at Excel row 6
 
@@ -51,7 +52,7 @@ def load_fn_table(path) -> pd.DataFrame:
     Returns DataFrame with float midpoint index (x), columns ['n', '+1d', ..., '+14d'].
     """
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    ws = wb[_PDF_SHEET]
+    ws = writer.find_sheet(wb, 'pdf')
 
     hdr    = next(ws.iter_rows(min_row=_PDF_HDR_ROW, max_row=_PDF_HDR_ROW, values_only=True))
     h_cols = [h for h in hdr if isinstance(h, str) and h.startswith('+')]

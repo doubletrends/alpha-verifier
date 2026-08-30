@@ -1,36 +1,61 @@
 import numpy as np
 import pandas as pd
 
+from engine import outcomes
+
 MIN_N = 20
 
 
+def _outcome_series(
+    data:           pd.DataFrame,
+    h:              int,
+    outcome:        str = 'up',
+    outcome_params: dict | None = None,
+) -> pd.Series:
+    """
+    Return 1.0/0.0/NaN: did the outcome event occur within h bars of t?
+
+    NaN for bars whose outcome is not yet realized (the trailing h rows, plus any
+    warmup the outcome itself requires). Delegates to the outcome registry; the
+    default 'up' reproduces the original P(close[t+h] > close[t]).
+    """
+    return outcomes.compute(data, outcome, h, outcome_params)
+
+
+# Retained under its original name: the directional special case.
 def _price_up(close: pd.Series, h: int) -> pd.Series:
-    """Return True/False/NaN: did close rise h bars later? NaN for the last h rows (no outcome yet)."""
     shifted = close.shift(-h)
     return (shifted > close).where(shifted.notna())
 
 
-def compute_base_rate(data: pd.DataFrame, horizons: list[int], horizon_unit: str = 'd') -> pd.DataFrame:
+def compute_base_rate(
+    data:           pd.DataFrame,
+    horizons:       list[int],
+    horizon_unit:   str = 'd',
+    outcome:        str = 'up',
+    outcome_params: dict | None = None,
+) -> pd.DataFrame:
     """
-    Unconditional win rate P(close[t+h] > close[t]) for each horizon h.
+    Unconditional rate P(outcome within h bars) for each horizon h.
 
     Returns a DataFrame indexed by horizon label (e.g. '+7d'), columns ['n', 'win_rate'].
-    win_rate is in percent. Rows where n < MIN_N are NaN.
+    win_rate is in percent and is the base rate of whatever outcome is configured —
+    the column name is kept for backward compatibility with existing xlsx readers.
+    Rows where n < MIN_N are NaN.
     """
-    close = data['close']
-    rows  = []
+    rows = []
     for h in horizons:
-        fu    = _price_up(close, h)
-        valid = fu.notna()
+        ev    = _outcome_series(data, h, outcome, outcome_params)
+        valid = ev.notna()
         n     = int(valid.sum())
-        p     = float(fu[valid].mean() * 100) if n >= MIN_N else np.nan
+        p     = float(ev[valid].mean() * 100) if n >= MIN_N else np.nan
         rows.append({'n': n, 'win_rate': p})
     return pd.DataFrame(rows, index=pd.Index([f'+{h}{horizon_unit}' for h in horizons], name='horizon'))
 
 
-def _row(mask: pd.Series, future_ups: dict, horizons: list[int]) -> list:
+def _row(mask: pd.Series, events: dict, horizons: list[int]) -> list:
     """
-    Compute win rates for one threshold slice across all horizons.
+    Compute outcome rates for one threshold slice across all horizons.
 
     Returns [n_last, p_h1, p_h2, ...] where n_last is the observation count
     for the longest horizon — the most conservative choice because longer horizons
@@ -40,10 +65,10 @@ def _row(mask: pd.Series, future_ups: dict, horizons: list[int]) -> list:
     row     = []
     n_last  = 0
     for i, h in enumerate(horizons):
-        fu    = future_ups[h]
-        valid = mask & fu.notna()
+        ev    = events[h]
+        valid = mask & ev.notna()
         n     = int(valid.sum())
-        p     = float(fu[valid].mean() * 100) if n >= MIN_N else np.nan
+        p     = float(ev[valid].mean() * 100) if n >= MIN_N else np.nan
         if i == len(horizons) - 1:
             n_last = n
         row.append(p)
@@ -51,33 +76,34 @@ def _row(mask: pd.Series, future_ups: dict, horizons: list[int]) -> list:
 
 
 def compute_matrix(
-    feature:      pd.Series,
-    thresholds:   np.ndarray,
-    horizons:     list[int],
-    data:         pd.DataFrame,
-    horizon_unit: str = 'd',
+    feature:        pd.Series,
+    thresholds:     np.ndarray,
+    horizons:       list[int],
+    data:           pd.DataFrame,
+    horizon_unit:   str = 'd',
+    outcome:        str = 'up',
+    outcome_params: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Compute CDF-style conditional win rates across a range of thresholds.
+    Compute CDF-style conditional outcome rates across a range of thresholds.
 
     For each threshold t, computes:
-      p_below: P(up | feature < t) − one row per threshold, columns [n, +h1, +h2, ...]
-      p_above: P(up | feature > t) − same layout
+      p_below: P(outcome | feature < t) − one row per threshold, columns [n, +h1, +h2, ...]
+      p_above: P(outcome | feature > t) − same layout
 
-    Win rates are in percent (raw, not yet subtracted from base rate).
+    Rates are in percent (raw, not yet subtracted from base rate).
     The n column reports the longest-horizon count (most conservative); see _row.
     """
-    close      = data['close']
-    feature    = feature.reindex(data.index)
-    future_ups = {h: _price_up(close, h) for h in horizons}
+    feature = feature.reindex(data.index)
+    events  = {h: _outcome_series(data, h, outcome, outcome_params) for h in horizons}
     col_labels = [f'+{h}{horizon_unit}' for h in horizons]
 
     rows_below, rows_above = [], []
     idx_below,  idx_above  = [], []
 
     for t in thresholds:
-        rows_below.append(_row(feature < t, future_ups, horizons))
-        rows_above.append(_row(feature > t, future_ups, horizons))
+        rows_below.append(_row(feature < t, events, horizons))
+        rows_above.append(_row(feature > t, events, horizons))
         idx_below.append(f'X < {t:.4g}')
         idx_above.append(f'X > {t:.4g}')
 

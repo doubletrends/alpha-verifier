@@ -33,6 +33,8 @@ from data import features, fetcher
 from engine import matrix as engine
 from engine import writer
 from engine import combiner as cmb
+from engine import outcomes
+from engine import validate as val
 from tree.tree import (
     load_tree, save_tree, all_nodes, find_node,
     pending_in_family, all_in_family, next_pending,
@@ -73,7 +75,7 @@ def _select_best_nodes(
     best: dict[str, tuple[dict, float]] = {}
     for fam, nodes in by_family.items():
         for node in nodes:
-            path = ws.output_dir(fam) / f'{node["id"]}.xlsx'
+            path = ws.output_path(fam, node['id'])
             if not path.exists():
                 continue
             try:
@@ -104,12 +106,13 @@ def run_node(ws: Workspace, node_id: str, regen: bool = False) -> None:
     node = find_node(tree, node_id)
 
     family  = node['family']
-    out_dir = ws.output_dir(family)
+    out_path = ws.output_path(family, node_id)
 
     print(f"\n{'=' * 60}")
     print(f"Node     : {node['id']}")
     print(f"Family   : {family}  |  Category: {node['category']}")
     print(f"Feature  : {node['feature']}  params={node['params']}")
+    print(f"Outcome  : {ws.outcome}  ->  P({ws.outcome_expr})")
     print(f"Sources  : {node['data']}")
     if node.get('derived_from'):
         print(f"Derived  : from {node['derived_from']}")
@@ -138,17 +141,27 @@ def run_node(ws: Workspace, node_id: str, regen: bool = False) -> None:
     thresholds = np.linspace(lo, hi, ws.n_thresholds)
     print(f'Feature p2→p98: [{lo:.4g}, {hi:.4g}]')
 
-    base_rate        = engine.compute_base_rate(data, ws.horizons, horizon_unit=ws.horizon_unit)
-    p_below, p_above = engine.compute_matrix(feat, thresholds, ws.horizons, data, horizon_unit=ws.horizon_unit)
+    base_rate        = engine.compute_base_rate(
+        data, ws.horizons, horizon_unit=ws.horizon_unit,
+        outcome=ws.outcome, outcome_params=ws.outcome_params,
+    )
+    p_below, p_above = engine.compute_matrix(
+        feat, thresholds, ws.horizons, data, horizon_unit=ws.horizon_unit,
+        outcome=ws.outcome, outcome_params=ws.outcome_params,
+    )
 
-    out_path = out_dir / f'{node_id}.xlsx'
-    writer.write_xlsx(p_below, p_above, base_rate, out_path, node_id)
+    writer.write_xlsx(
+        p_below, p_above, base_rate, out_path, node_id,
+        event=ws.event, title=ws.outcome_spec['title'], expr=ws.outcome_expr,
+    )
 
     br   = {row: round(float(base_rate.loc[row, 'win_rate']), 2) for row in base_rate.index}
     spot = '  '.join(f'{h}={br[h]:.1f}%' for h in ws.display_horizons if h in br)
-    print(f'Base rates: {spot}')
+    print(f'Base rate P({ws.outcome_expr}): {spot}')
 
-    if not regen:
+    if not regen and not ws.is_default_outcome:
+        print('Non-default outcome — file written, node status left unchanged.')
+    elif not regen:
         log_entry = {
             'node_id':      node_id,
             'family':       family,
@@ -177,19 +190,32 @@ def run_node(ws: Workspace, node_id: str, regen: bool = False) -> None:
 # ── CLI commands ──────────────────────────────────────────────────────────────
 
 def cmd_family(ws: Workspace, family_name: str) -> None:
-    tree    = load_tree(ws.tree_path)
-    pending = pending_in_family(tree, family_name)
-    if not pending:
+    tree = load_tree(ws.tree_path)
+
+    # Node status ('pending' / 'tested') tracks the default outcome only, so under
+    # any other outcome every node reads as already tested and there would be
+    # nothing pending to run. Target the whole family instead.
+    if ws.is_default_outcome:
+        todo, label = pending_in_family(tree, family_name), 'pending node'
+    else:
+        todo, label = all_in_family(tree, family_name), f"node under outcome '{ws.outcome}'"
+
+    if not todo:
         families = sorted({n['family'] for n in all_nodes(tree)})
-        print(f"No pending nodes in family '{family_name}'.")
+        print(f"No {label}s in family '{family_name}'.")
         print(f"Available families: {', '.join(families)}")
         return
-    print(f"Running {len(pending)} pending node(s) in family '{family_name}'...")
-    for node in pending:
+
+    print(f"Running {len(todo)} {label}(s) in family '{family_name}'...")
+    for node in todo:
         run_node(ws, node['id'])
 
 
 def cmd_next(ws: Workspace) -> None:
+    if not ws.is_default_outcome:
+        print(f"--next tracks status for the default outcome only; under '{ws.outcome}' "
+              f"use --family or --node.")
+        return
     tree = load_tree(ws.tree_path)
     node = next_pending(tree)
     if node is None:
@@ -229,9 +255,9 @@ def cmd_status(ws: Workspace) -> None:
 
 
 def _significant_rows(wb, read_h: list[str], min_n: int, min_dev: float):
-    """Yield (sheet_name, cond, n_raw, devs) for every significant row across ABOVE and BELOW sheets."""
-    for sheet_name in (writer.SHEET_ABOVE, writer.SHEET_BELOW):
-        ws_sheet = wb[sheet_name]
+    """Yield (kind, cond, n_raw, devs) for every significant row across ABOVE and BELOW sheets."""
+    for sheet_name in ('above', 'below'):
+        ws_sheet = writer.find_sheet(wb, sheet_name)
         rows = list(ws_sheet.iter_rows(values_only=True))
         hdrs = rows[4]
         ci   = {h: i for i, h in enumerate(hdrs) if h is not None}
@@ -250,7 +276,7 @@ def _significant_rows(wb, read_h: list[str], min_n: int, min_dev: float):
 def cmd_read(ws: Workspace, node_id: str) -> None:
     tree = load_tree(ws.tree_path)
     node = find_node(tree, node_id)
-    path = ws.output_dir(node['family']) / f'{node_id}.xlsx'
+    path = ws.output_path(node['family'], node_id)
 
     if not path.exists():
         print(f"No output file: {path}")
@@ -261,15 +287,14 @@ def cmd_read(ws: Workspace, node_id: str) -> None:
 
     print(f"\n{node_id}  [{node['family']}]  {node['feature']}  params={node['params']}")
 
-    by_sheet = {writer.SHEET_ABOVE: [], writer.SHEET_BELOW: []}
-    for sheet_name, cond, n_raw, devs in _significant_rows(wb, read_h, ws.read_min_n, ws.read_min_dev):
-        by_sheet[sheet_name].append((cond, n_raw, devs))
+    by_sheet = {'above': [], 'below': []}
+    for kind, cond, n_raw, devs in _significant_rows(wb, read_h, ws.read_min_n, ws.read_min_dev):
+        by_sheet[kind].append((cond, n_raw, devs))
 
     h_hdr = ''.join(f'{h:>8}' for h in read_h)
     h_sep = ''.join('--------' for _ in read_h)
-    for sheet_name in (writer.SHEET_ABOVE, writer.SHEET_BELOW):
-        direction  = 'above' if '>' in sheet_name else 'below'
-        significant = by_sheet[sheet_name]
+    for direction in ('above', 'below'):
+        significant = by_sheet[direction]
         if not significant:
             print(f"\n  [{direction}]  no rows ≥ {ws.read_min_dev}pp with n ≥ {ws.read_min_n}")
             continue
@@ -291,7 +316,10 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
 
     print('Fetching latest data...')
     ohlcv_data = get_data(['ohlcv'])
-    base_rate  = engine.compute_base_rate(ohlcv_data, ws.horizons, horizon_unit=ws.horizon_unit)
+    base_rate  = engine.compute_base_rate(
+        ohlcv_data, ws.horizons, horizon_unit=ws.horizon_unit,
+        outcome=ws.outcome, outcome_params=ws.outcome_params,
+    )
     br_series  = base_rate['win_rate']
 
     key_h  = ws.key_horizons
@@ -308,7 +336,7 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
 
     for fam in sorted(best):
         node, _ = best[fam]
-        path    = ws.output_dir(fam) / f'{node["id"]}.xlsx'
+        path    = ws.output_path(fam, node['id'])
         try:
             data = get_data(node['data'])
             if data.empty:
@@ -358,6 +386,142 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
     print()
 
 
+
+def cmd_validate(
+    ws:              Workspace,
+    families_filter: list[str] | None = None,
+    n_shifts:        int = val.DEFAULT_SHIFTS,
+) -> None:
+    """
+    Test every tested node against its circular-shift null and write validation.json.
+
+    A node's peak deviation is a max over ~30 bins, which is biased upward even under
+    pure noise; this reports how far the real peak sits inside the null that the same
+    node would have produced by chance. Bonferroni correction is applied across every
+    test in the sweep, so a 'structure' verdict already accounts for the search size.
+    """
+    by_family = _tested_by_family(ws, families_filter)
+    get_data  = _make_loader(ws)
+    nodes     = [n for fam in sorted(by_family) for n in by_family[fam]]
+
+    if not nodes:
+        print('No tested nodes to validate.')
+        return
+
+    read_h  = ws.display_horizons
+    n_tests = len(nodes) * len(read_h)
+
+    print()
+    print(f"=== Validation [{ws.dir.name}] - outcome '{ws.outcome}' ===")
+    print(f"  event   : P({ws.outcome_expr})")
+    print(f"  sweep   : {len(nodes)} nodes x {len(read_h)} horizons = {n_tests} tests, "
+          f"{n_shifts} circular shifts each")
+    print(f"  alpha   : 0.05 / {n_tests} = {0.05 / n_tests:.2e} (Bonferroni)")
+    print()
+
+    h_hdr = ''.join(f'{h:>28}' for h in read_h)
+    print(f"  {'node':<26}  {'family':<12}{h_hdr}")
+    print(f"  {'-' * 26}  {'-' * 12}{''.join('-' * 28 for _ in read_h)}")
+
+    results = {}
+    for node in nodes:
+        fam = node['family']
+        try:
+            data  = get_data(node['data'])
+            feat  = features.compute(data, node['feature'], node['params']).reindex(data.index)
+            valid = feat.dropna()
+            if valid.empty:
+                raise ValueError('no valid feature values')
+            lo, hi     = np.nanpercentile(valid, 2), np.nanpercentile(valid, 98)
+            thresholds = np.linspace(float(lo), float(hi), ws.n_thresholds)
+        except Exception as e:
+            print(f"  {node['id']:<26}  {fam:<12}  [skip] {e}")
+            continue
+
+        cells, per_h = [], {}
+        for h in read_h:
+            ev  = outcomes.compute(data, ws.outcome, _h_num(h), ws.outcome_params)
+            res = val.null_test(feat, ev, thresholds, n_shifts=n_shifts)
+            res['verdict'] = val.verdict(res['p_value'], n_tests=n_tests,
+                                         p_floor=res.get('p_floor', 0.0))
+            per_h[h] = res
+            if pd.isna(res['real']):
+                cells.append(f"{'insufficient':>28}")
+            else:
+                mark = {'structure': ' **', 'nominal': ' * ', 'underpowered': ' ? ',
+                        'noise': '   ', 'insufficient': '   '}[res['verdict']]
+                cells.append(f"{res['real']:>9.1f} vs{res['null_p95']:>6.1f}  p={res['p_value']:<5.3f}{mark}")
+
+        results[node['id']] = {'family': fam, 'horizons': per_h}
+        print(f"  {node['id']:<26}  {fam:<12}{''.join(cells)}")
+
+    print()
+    print('  columns: real peak  vs  null p95   p-value')
+    print('  ** clears Bonferroni   * nominal only   ? at the resolution floor, needs more shifts')
+    print()
+
+    # Merge into any prior sweep for this outcome, so validating one family at a
+    # time never discards the rest. Bonferroni is then applied over every test in
+    # the merged file — narrowing --families must not quietly shrink the correction
+    # for a search that was already run wide.
+    name = 'validation.json' if ws.is_default_outcome else f'validation.{ws.event}.json'
+    path = ws.dir / name
+
+    merged = {}
+    if path.exists():
+        try:
+            with open(path, encoding='utf-8') as f:
+                prior = json.load(f)
+            if prior.get('outcome', {}).get('name') == ws.outcome:
+                merged = prior.get('nodes', {})
+        except (json.JSONDecodeError, OSError):
+            pass
+    merged.update(results)
+
+    n_merged = sum(len(n['horizons']) for n in merged.values())
+    for node_res in merged.values():
+        for res in node_res['horizons'].values():
+            res['verdict'] = val.verdict(res['p_value'], n_tests=n_merged,
+                                         p_floor=res.get('p_floor', 0.0))
+
+    results   = merged
+    n_tests   = n_merged
+    flat      = [r for n in results.values() for r in n['horizons'].values()]
+    n_struct  = sum(1 for r in flat if r['verdict'] == 'structure')
+    n_under   = sum(1 for r in flat if r['verdict'] == 'underpowered')
+    n_nominal = sum(1 for r in flat if r['verdict'] == 'nominal')
+    expected  = 0.05 * len(flat)
+    print(f"  (Bonferroni over {n_tests} tests in {path.name}, including earlier runs)")
+    print(f"  clears Bonferroni : {n_struct:>4} / {len(flat)}")
+    print(f"  at floor (needs +): {n_under:>4} / {len(flat)}")
+    print(f"  nominal (p<0.05)  : {n_nominal:>4} / {len(flat)}   (expected by chance ~{expected:.1f})")
+    if n_under:
+        need = val.shifts_needed(n_tests=n_tests)
+        print(f"  -> re-run with --shifts {need} to resolve the {n_under} sitting at the floor.")
+    if n_struct == 0 and n_under == 0 and n_nominal <= expected:
+        print('  -> no more hits than chance alone would produce; treat as no structure.')
+
+    out = {
+        'workspace':  ws.dir.name,
+        'outcome':    {'name': ws.outcome, 'params': ws.outcome_params, 'expr': ws.outcome_expr},
+        'generated':  datetime.now(timezone.utc).isoformat(),
+        # A merged file can hold records from runs of differing depth, so report the
+        # range actually present rather than just this run's setting.
+        'n_shifts':   {'min': min(r.get('n_shifts', n_shifts) for r in flat),
+                       'max': max(r.get('n_shifts', n_shifts) for r in flat),
+                       'last_run': n_shifts},
+        'n_tests':    n_tests,
+        'alpha_bonf': 0.05 / n_tests,
+        'summary':    {'structure': n_struct, 'underpowered': n_under,
+                       'nominal': n_nominal, 'total': len(flat)},
+        'nodes':      results,
+    }
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(out, f, indent=2)
+    print()
+    print(f"Wrote {path.relative_to(ROOT)}")
+
+
 def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> None:
     by_family = _tested_by_family(ws, families_filter)
     best      = _select_best_nodes(ws, by_family)
@@ -365,7 +529,10 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
 
     print('Fetching data and computing feature series...')
     ohlcv_data = get_data(['ohlcv'])
-    base_rate  = engine.compute_base_rate(ohlcv_data, ws.horizons, horizon_unit=ws.horizon_unit)
+    base_rate  = engine.compute_base_rate(
+        ohlcv_data, ws.horizons, horizon_unit=ws.horizon_unit,
+        outcome=ws.outcome, outcome_params=ws.outcome_params,
+    )
     br_series  = base_rate['win_rate']
 
     selected: list[dict]               = []
@@ -374,7 +541,7 @@ def cmd_backtest(ws: Workspace, families_filter: list[str] | None = None) -> Non
 
     for fam in sorted(best):
         node, _ = best[fam]
-        path    = ws.output_dir(fam) / f'{node["id"]}.xlsx'
+        path    = ws.output_path(fam, node['id'])
         try:
             data = get_data(node['data'])
             if data.empty:
@@ -537,17 +704,79 @@ def cmd_regen(ws: Workspace, family_name: str | None, node_id: str | None) -> No
             run_node(ws, nid, regen=True)
 
 
+# Ordered weakest to strongest; a family inherits the best verdict its node earned
+# at any reported horizon.
+_VERDICT_RANK = ['insufficient', 'noise', 'underpowered', 'nominal', 'structure']
+
+
+def _load_validation(ws: Workspace) -> dict:
+    """
+    Read the validation file matching the active outcome, if one exists.
+
+    Returns {node_id: {horizon: record}}; empty when the sweep has not been run,
+    which is itself meaningful — findings then report 'unvalidated' rather than
+    claiming an edge no null test has seen.
+    """
+    name = 'validation.json' if ws.is_default_outcome else f'validation.{ws.event}.json'
+    path = ws.dir / name
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            raw = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if raw.get('outcome', {}).get('name', 'up') != ws.outcome:
+        return {}
+    return {nid: rec.get('horizons', {}) for nid, rec in raw.get('nodes', {}).items()}
+
+
+def _family_verdict(node_validation: dict) -> tuple[str, dict]:
+    """
+    Collapse one node's per-horizon null tests into a family verdict.
+
+    The family takes the strongest verdict any horizon earned, together with the
+    smallest p-value seen, so a node significant at a single horizon is neither
+    hidden nor promoted to significance everywhere.
+    """
+    if not node_validation:
+        return 'unvalidated', {}
+    best_rank = -1
+    best      = 'noise'
+    min_p     = None
+    detail    = {}
+    for h, rec in node_validation.items():
+        v = rec.get('verdict', 'noise')
+        detail[h] = {
+            'real':     rec.get('real'),
+            'null_p95': rec.get('null_p95'),
+            'p_value':  rec.get('p_value'),
+            'verdict':  v,
+        }
+        rank = _VERDICT_RANK.index(v) if v in _VERDICT_RANK else 0
+        if rank > best_rank:
+            best_rank, best = rank, v
+        pv = rec.get('p_value')
+        if pv is not None and (min_p is None or pv < min_p):
+            min_p = pv
+    return best, {'min_p_value': min_p, 'horizons': detail}
+
+
 def cmd_findings(ws: Workspace) -> None:
     by_family = _tested_by_family(ws)
     best      = _select_best_nodes(ws, by_family)
 
-    # Load existing findings to preserve hand-written notes
-    findings_path = ws.dir / 'findings.json'
+    # Load existing findings to preserve hand-written notes. Like validation, the
+    # file is per-outcome so a drawdown sweep never overwrites the directional one.
+    findings_path = (ws.dir / 'findings.json' if ws.is_default_outcome
+                     else ws.dir / f'findings.{ws.event}.json')
     existing: dict = {}
     if findings_path.exists():
         with open(findings_path, encoding='utf-8') as f:
             raw = json.load(f)
         existing = raw.get('families', {})
+
+    validation = _load_validation(ws)
 
     read_h   = ws.display_horizons
     families = {}
@@ -555,22 +784,29 @@ def cmd_findings(ws: Workspace) -> None:
     for fam in sorted(best):
         best_node, best_pk = best[fam]
 
-        path = ws.output_dir(fam) / f'{best_node["id"]}.xlsx'
+        path = ws.output_path(fam, best_node['id'])
         wb   = openpyxl.load_workbook(path, data_only=True)
         conditions = []
 
-        for sheet_name, cond, n_raw, devs in _significant_rows(wb, read_h, ws.read_min_n, ws.read_min_dev):
+        for kind, cond, n_raw, devs in _significant_rows(wb, read_h, ws.read_min_n, ws.read_min_dev):
             conditions.append({
-                'direction':  'above' if '>' in sheet_name else 'below',
+                'direction':  kind,
                 'condition':  str(cond),
                 'n':          int(n_raw),
                 'deviations': {h: round(float(v), 2) for h, v in devs.items()},
             })
 
+        verdict, val_detail = _family_verdict(validation.get(best_node['id'], {}))
+
         families[fam] = {
             'best_node':   best_node['id'],
             'peak_signal': round(best_pk, 2),
-            'verdict':     'edge' if conditions else 'no_edge',
+            # 'verdict' is the null-test result, not a count of significant rows:
+            # a peak deviation only means something relative to the null that the
+            # same max-over-bins statistic produces by chance.
+            'verdict':     verdict,
+            'has_rows':    bool(conditions),
+            'validation':  val_detail,
             'conditions':  conditions,
             'notes':       existing.get(fam, {}).get('notes', ''),
         }
@@ -578,18 +814,24 @@ def cmd_findings(ws: Workspace) -> None:
     out = {
         'workspace':        ws.dir.name,
         'generated':        datetime.now(timezone.utc).isoformat(),
+        'outcome':          {'name': ws.outcome, 'params': ws.outcome_params,
+                             'expr': ws.outcome_expr},
         'display_horizons': read_h,
+        'validated':        bool(validation),
         'families':         families,
     }
 
     with open(findings_path, 'w', encoding='utf-8') as f:
         json.dump(out, f, indent=2)
 
-    edge_fams    = [f for f, v in families.items() if v['verdict'] == 'edge']
-    no_edge_fams = [f for f in families if f not in edge_fams]
     print(f"Wrote findings for {len(families)} families → {findings_path.relative_to(ROOT)}")
-    print(f"  Edge    : {', '.join(edge_fams) or '—'}")
-    print(f"  No edge : {', '.join(no_edge_fams) or '—'}")
+    if not validation:
+        print('  No validation file for this outcome — every family reported as '
+              "'unvalidated'. Run --validate first.")
+    for v in reversed(_VERDICT_RANK + ['unvalidated']):
+        fams = [f for f, rec in families.items() if rec['verdict'] == v]
+        if fams:
+            print(f"  {v:<13}: {', '.join(sorted(fams))}")
 
 
 # ── entry ─────────────────────────────────────────────────────────────────────
@@ -600,7 +842,14 @@ if __name__ == '__main__':
     parser.add_argument('--regen',    action='store_true', help='Regenerate xlsx without changing status')
     parser.add_argument('--family',   metavar='NAME',      help='Target family')
     parser.add_argument('--node',     metavar='ID',        help='Target node')
-    parser.add_argument('--families', metavar='FAM,...',   help='Comma-separated families for --probe/--backtest')
+    parser.add_argument('--families', metavar='FAM,...',   help='Comma-separated families for --probe/--backtest/--validate')
+    parser.add_argument('--outcome',  metavar='NAME',
+                        help='Outcome to measure instead of the workspace default: '
+                             + ', '.join(outcomes.available()))
+    parser.add_argument('--threshold', type=float, metavar='FRAC',
+                        help='Threshold for the drawdown/runup outcomes, as a fraction (default 0.10)')
+    parser.add_argument('--shifts',   type=int, default=val.DEFAULT_SHIFTS, metavar='N',
+                        help='Circular shifts per --validate test (default %d)' % val.DEFAULT_SHIFTS)
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--next',     action='store_true', help='Run the next pending node')
@@ -610,9 +859,20 @@ if __name__ == '__main__':
     group.add_argument('--probe',    action='store_true', help='Combined P(up) probe across all families')
     group.add_argument('--backtest', action='store_true', help='Backtest probe signal on historical sample dates')
     group.add_argument('--findings', action='store_true', help='Generate findings.json for the workspace')
+    group.add_argument('--validate', action='store_true', help='Shuffle-null test every tested node; writes validation.json')
 
     args = parser.parse_args()
     ws   = Workspace(args.workspace)
+
+    if args.outcome or args.threshold is not None:
+        name   = args.outcome or ws.outcome
+        params = dict(ws.outcome_params) if name == ws.outcome else {}
+        if args.threshold is not None:
+            params['threshold'] = args.threshold
+        try:
+            ws.set_outcome(name, params)
+        except KeyError as e:
+            parser.error(str(e))
 
     fam_filter = [f.strip() for f in args.families.split(',')] if args.families else None
 
@@ -624,6 +884,8 @@ if __name__ == '__main__':
         cmd_backtest(ws, fam_filter)
     elif args.findings:
         cmd_findings(ws)
+    elif args.validate:
+        cmd_validate(ws, fam_filter, n_shifts=args.shifts)
     elif args.regen:
         cmd_regen(ws, args.family, args.node)
     elif args.next:
