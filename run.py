@@ -35,6 +35,7 @@ from engine import writer
 from engine import combiner as cmb
 from engine import outcomes
 from engine import validate as val
+from engine import harrv
 from tree.tree import (
     load_tree, save_tree, all_nodes, find_node,
     pending_in_family, all_in_family, next_pending,
@@ -385,6 +386,92 @@ def cmd_probe(ws: Workspace, families_filter: list[str] | None = None) -> None:
     print('  * Assumes feature independence. Correlated signals may inflate the estimate.')
     print()
 
+
+
+
+def cmd_volforecast(
+    ws:       Workspace,
+    horizons: list[int] | None = None,
+    iv_source: str = 'dvol',
+) -> None:
+    """
+    Forecast realized volatility and benchmark it against naive persistence and IV.
+
+    Three questions, in order of how much they matter:
+      1. Does HAR beat carrying today's RV forward?   (is the model doing anything)
+      2. Does HAR beat the option market's own IV?    (is it competitive)
+      3. Does HAR add anything *to* IV?               (is there a trade in it)
+
+    The third is the one that decides tradeability, and it is answered by the
+    encompassing regression rather than by any single-model score.
+    """
+    horizons = horizons or [5, 14, 30]
+    get_data = _make_loader(ws)
+
+    sources = ['ohlcv']
+    try:
+        data = get_data(['ohlcv', iv_source])
+        if iv_source in data.columns and data[iv_source].notna().any():
+            sources = ['ohlcv', iv_source]
+        else:
+            data = get_data(['ohlcv'])
+    except Exception as e:
+        print(f"  [no IV] source '{iv_source}' unavailable ({e}); comparing HAR vs RV only.")
+        data = get_data(['ohlcv'])
+
+    data = data.dropna(subset=['close'])
+    ret  = harrv.log_returns(data['close'])
+    iv   = data[iv_source] if iv_source in data.columns else None
+
+    print(f"\n=== Volatility forecast [{ws.dir.name}] ===")
+    print(f"  price history : {data.index[0].date()} -> {data.index[-1].date()}  ({len(data)} bars)")
+    if iv is not None:
+        ivv = iv.dropna()
+        print(f"  implied vol   : {iv_source}, {ivv.index[0].date()} -> {ivv.index[-1].date()} "
+              f"({len(ivv)} obs, mean {ivv.mean():.1f})")
+    print(f"  annualization : {harrv.ANNUALIZE:g} bars/year")
+
+    results = {}
+    for h in horizons:
+        preds = harrv.walk_forward(ret, h, iv=iv)
+        if preds.empty:
+            print(f"\n  h={h}: not enough history.")
+            continue
+        s = harrv.score(preds)
+        results[h] = (preds, s)
+
+        note = '' if h >= harrv.MIN_HONEST_H else '   [too short for daily-close RV]'
+        print(f"\n  --- h = {h} bars ---  n={int(s['n'].iloc[0])}{note}")
+        print(f"    {'model':<10}{'QLIKE':>9}{'R2 log':>9}{'R2 level':>10}{'RMSE':>9}{'bias':>9}")
+        print(f"    {'-'*10}{'-'*9}{'-'*9}{'-'*10}{'-'*9}{'-'*9}")
+        for m in s.index:
+            r = s.loc[m]
+            print(f"    {m:<10}{r['qlike']:>9.4f}{r['r2_log']:>+9.3f}{r['r2_level']:>+10.3f}"
+                  f"{r['rmse']:>9.2f}{r['bias']:>+9.2f}")
+
+        enc = harrv.encompassing(preds)
+        if enc:
+            print(f"    encompassing (log RV on both forecasts):")
+            print(f"      beta_har={enc['beta_har']:+.3f}   beta_iv={enc['beta_iv']:+.3f}")
+            print(f"      R2 both={enc['r2']:.3f}   HAR alone={enc['r2_har_only']:.3f}   "
+                  f"IV alone={enc['r2_iv_only']:.3f}")
+            gain = enc['r2'] - enc['r2_iv_only']
+            verdict = ('HAR adds nothing to IV' if gain < 0.01
+                       else f'HAR adds {gain:+.3f} R2 over IV alone')
+            print(f"      -> {verdict}")
+
+    if not results:
+        return
+
+    if iv is not None:
+        print(f"\n  Variance risk premium (IV minus subsequent realized vol):")
+        for h, (preds, s) in results.items():
+            if 'iv' in s.index:
+                print(f"    h={h:>2}: {s.loc['iv', 'bias']:+.2f} vol points "
+                      f"(IV mean {s.loc['iv', 'mean_fc']:.1f})")
+        print('    A positive premium is why an accurate forecast is not automatically a trade:')
+        print('    buying volatility pays this away before the forecast has a chance to be right.')
+    print()
 
 
 def cmd_validate(
@@ -848,6 +935,8 @@ if __name__ == '__main__':
                              + ', '.join(outcomes.available()))
     parser.add_argument('--threshold', type=float, metavar='FRAC',
                         help='Threshold for the drawdown/runup outcomes, as a fraction (default 0.10)')
+    parser.add_argument('--vol-horizons', metavar='H,...', default='5,14,30',
+                        help='Forecast horizons in bars for --volforecast (default 5,14,30)')
     parser.add_argument('--shifts',   type=int, default=val.DEFAULT_SHIFTS, metavar='N',
                         help='Circular shifts per --validate test (default %d)' % val.DEFAULT_SHIFTS)
 
@@ -860,6 +949,8 @@ if __name__ == '__main__':
     group.add_argument('--backtest', action='store_true', help='Backtest probe signal on historical sample dates')
     group.add_argument('--findings', action='store_true', help='Generate findings.json for the workspace')
     group.add_argument('--validate', action='store_true', help='Shuffle-null test every tested node; writes validation.json')
+    group.add_argument('--volforecast', action='store_true',
+                       help='HAR-RV vs naive RV vs implied vol on the workspace asset')
 
     args = parser.parse_args()
     ws   = Workspace(args.workspace)
@@ -886,6 +977,9 @@ if __name__ == '__main__':
         cmd_findings(ws)
     elif args.validate:
         cmd_validate(ws, fam_filter, n_shifts=args.shifts)
+    elif args.volforecast:
+        hs = [int(x) for x in args.vol_horizons.split(',') if x.strip()]
+        cmd_volforecast(ws, hs)
     elif args.regen:
         cmd_regen(ws, args.family, args.node)
     elif args.next:
